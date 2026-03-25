@@ -19,7 +19,6 @@ val nativePlatforms =
         NativePlatform("linux-aarch64-gnu", "linux-aarch64-gnu"),
         // Future: NativePlatform("linux-x86_64-musl", "linux-x86_64-musl"),
         // Future: NativePlatform("linux-aarch64-musl", "linux-aarch64-musl"),
-        NativePlatform("macos-x86_64", "macos-x86_64"),
         NativePlatform("macos-aarch64", "macos-aarch64"),
         NativePlatform("windows-x86_64", "windows-x86_64"),
     )
@@ -55,7 +54,6 @@ val arch: String = System.getProperty("os.arch")
 val nativePlatform: String =
     when {
         os.isMacOsX && arch == "aarch64" -> "macos-aarch64"
-        os.isMacOsX -> "macos-x86_64"
         os.isLinux && arch == "aarch64" -> "linux-aarch64-gnu"
         os.isLinux -> "linux-x86_64-gnu"
         os.isWindows -> "windows-x86_64"
@@ -248,42 +246,6 @@ val copyNativeLibMacosAarch64 by tasks.registering(Copy::class) {
     into(nativeLibsDir.map { it.dir("native/macos-aarch64") })
 }
 
-// macOS x86_64 (Intel) build - native on Intel Mac runner
-val cargoBuildMacosx8664 by tasks.registering(Exec::class) {
-    description = "Build native library for macos-x86_64 (native on Intel Mac)"
-    group = "build"
-    workingDir = file("rust")
-    commandLine(
-        "cargo",
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "temporalio-sdk-core-c-bridge",
-        "--target",
-        "x86_64-apple-darwin",
-    )
-
-    inputs.files(
-        fileTree("rust") {
-            include("Cargo.toml", "Cargo.lock")
-        },
-        fileTree("rust/sdk-core") {
-            include("**/*.rs", "**/Cargo.toml")
-        },
-    )
-    outputs.file("rust/target/x86_64-apple-darwin/release/lib$nativeLibName.dylib")
-}
-
-val copyNativeLibMacosx8664 by tasks.registering(Copy::class) {
-    description = "Copy native library for macos-x86_64 to build directory"
-    group = "build"
-    dependsOn(cargoBuildMacosx8664)
-
-    from("rust/target/x86_64-apple-darwin/release/lib$nativeLibName.dylib")
-    into(nativeLibsDir.map { it.dir("native/macos-x86_64") })
-}
-
 // Build all platforms task
 val cargoBuildAll by tasks.registering {
     description = "Build Rust native library for all supported platforms"
@@ -293,7 +255,6 @@ val cargoBuildAll by tasks.registering {
         cargoBuildLinuxAarch64,
         cargoBuildWindowsx8664,
         cargoBuildMacosAarch64,
-        cargoBuildMacosx8664,
     )
 }
 
@@ -305,7 +266,6 @@ val copyAllNativeLibs by tasks.registering {
         copyNativeLibLinuxAarch64,
         copyNativeLibWindowsx8664,
         copyNativeLibMacosAarch64,
-        copyNativeLibMacosx8664,
     )
 }
 
@@ -320,12 +280,6 @@ val copyMacosAarch64NativeLib by tasks.registering {
     description = "Copy macOS ARM64 native library (for ARM Mac CI runner)"
     group = "build"
     dependsOn(copyNativeLibMacosAarch64)
-}
-
-val copyMacosx8664NativeLib by tasks.registering {
-    description = "Copy macOS x86_64 native library (for Intel Mac CI runner)"
-    group = "build"
-    dependsOn(copyNativeLibMacosx8664)
 }
 
 val copyWindowsNativeLib by tasks.registering {

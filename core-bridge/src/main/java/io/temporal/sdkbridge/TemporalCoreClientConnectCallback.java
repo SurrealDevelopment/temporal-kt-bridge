@@ -14,7 +14,7 @@ import static java.lang.foreign.MemoryLayout.PathElement.*;
 
 /**
  * {@snippet lang=c :
- * typedef void (*TemporalCoreClientConnectCallback)(void *, struct TemporalCoreClient *, const struct TemporalCoreByteArray {
+ * typedef void (*TemporalCoreClientConnectCallback)(void *, struct TemporalCoreConnection *, const struct TemporalCoreByteArray {
  *     const uint8_t *data;
  *     size_t size;
  *     size_t cap;

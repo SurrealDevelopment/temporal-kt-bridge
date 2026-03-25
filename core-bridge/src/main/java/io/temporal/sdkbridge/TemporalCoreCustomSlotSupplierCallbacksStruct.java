@@ -26,9 +26,9 @@ import static java.lang.foreign.MemoryLayout.PathElement.*;
  * }
  * }
  */
-public class TemporalCoreCustomSlotSupplierCallbacks$1 {
+public class TemporalCoreCustomSlotSupplierCallbacksStruct {
 
-    TemporalCoreCustomSlotSupplierCallbacks$1() {
+    TemporalCoreCustomSlotSupplierCallbacksStruct() {
         // Should not be called directly
     }
 

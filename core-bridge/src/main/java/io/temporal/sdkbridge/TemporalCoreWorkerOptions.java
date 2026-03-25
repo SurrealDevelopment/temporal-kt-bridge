@@ -35,6 +35,7 @@ import static java.lang.foreign.MemoryLayout.PathElement.*;
  *     bool nondeterminism_as_workflow_fail;
  *     struct TemporalCoreByteArrayRefArray nondeterminism_as_workflow_fail_for_types;
  *     struct TemporalCoreByteArrayRefArray plugins;
+ *     struct TemporalCoreByteArrayRefArray storage_drivers;
  * }
  * }
  */
@@ -68,7 +69,8 @@ public class TemporalCoreWorkerOptions {
         temporal_sdk_core_c_bridge_h.C_BOOL.withName("nondeterminism_as_workflow_fail"),
         MemoryLayout.paddingLayout(7),
         TemporalCoreByteArrayRefArray.layout().withName("nondeterminism_as_workflow_fail_for_types"),
-        TemporalCoreByteArrayRefArray.layout().withName("plugins")
+        TemporalCoreByteArrayRefArray.layout().withName("plugins"),
+        TemporalCoreByteArrayRefArray.layout().withName("storage_drivers")
     ).withName("TemporalCoreWorkerOptions");
 
     /**
@@ -956,6 +958,50 @@ public class TemporalCoreWorkerOptions {
      */
     public static void plugins(MemorySegment struct, MemorySegment fieldValue) {
         MemorySegment.copy(fieldValue, 0L, struct, plugins$OFFSET, plugins$LAYOUT.byteSize());
+    }
+
+    private static final GroupLayout storage_drivers$LAYOUT = (GroupLayout)$LAYOUT.select(groupElement("storage_drivers"));
+
+    /**
+     * Layout for field:
+     * {@snippet lang=c :
+     * struct TemporalCoreByteArrayRefArray storage_drivers
+     * }
+     */
+    public static final GroupLayout storage_drivers$layout() {
+        return storage_drivers$LAYOUT;
+    }
+
+    private static final long storage_drivers$OFFSET = $LAYOUT.byteOffset(groupElement("storage_drivers"));
+
+    /**
+     * Offset for field:
+     * {@snippet lang=c :
+     * struct TemporalCoreByteArrayRefArray storage_drivers
+     * }
+     */
+    public static final long storage_drivers$offset() {
+        return storage_drivers$OFFSET;
+    }
+
+    /**
+     * Getter for field:
+     * {@snippet lang=c :
+     * struct TemporalCoreByteArrayRefArray storage_drivers
+     * }
+     */
+    public static MemorySegment storage_drivers(MemorySegment struct) {
+        return struct.asSlice(storage_drivers$OFFSET, storage_drivers$LAYOUT.byteSize());
+    }
+
+    /**
+     * Setter for field:
+     * {@snippet lang=c :
+     * struct TemporalCoreByteArrayRefArray storage_drivers
+     * }
+     */
+    public static void storage_drivers(MemorySegment struct, MemorySegment fieldValue) {
+        MemorySegment.copy(fieldValue, 0L, struct, storage_drivers$OFFSET, storage_drivers$LAYOUT.byteSize());
     }
 
     /**

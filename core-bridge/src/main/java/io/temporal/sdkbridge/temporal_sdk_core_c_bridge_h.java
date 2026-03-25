@@ -558,7 +558,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreClientOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
+     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreConnectionOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
      * }
      */
     public static FunctionDescriptor temporal_core_client_connect$descriptor() {
@@ -568,7 +568,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreClientOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
+     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreConnectionOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
      * }
      */
     public static MethodHandle temporal_core_client_connect$handle() {
@@ -578,7 +578,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreClientOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
+     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreConnectionOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
      * }
      */
     public static MemorySegment temporal_core_client_connect$address() {
@@ -587,7 +587,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreClientOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
+     * void temporal_core_client_connect(struct TemporalCoreRuntime *runtime, const struct TemporalCoreConnectionOptions *options, void *user_data, TemporalCoreClientConnectCallback callback)
      * }
      */
     public static void temporal_core_client_connect(MemorySegment runtime, MemorySegment options, MemorySegment user_data, MemorySegment callback) {
@@ -617,7 +617,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * void temporal_core_client_free(struct TemporalCoreClient *client)
+     * void temporal_core_client_free(struct TemporalCoreConnection *client)
      * }
      */
     public static FunctionDescriptor temporal_core_client_free$descriptor() {
@@ -627,7 +627,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * void temporal_core_client_free(struct TemporalCoreClient *client)
+     * void temporal_core_client_free(struct TemporalCoreConnection *client)
      * }
      */
     public static MethodHandle temporal_core_client_free$handle() {
@@ -637,7 +637,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * void temporal_core_client_free(struct TemporalCoreClient *client)
+     * void temporal_core_client_free(struct TemporalCoreConnection *client)
      * }
      */
     public static MemorySegment temporal_core_client_free$address() {
@@ -646,7 +646,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * void temporal_core_client_free(struct TemporalCoreClient *client)
+     * void temporal_core_client_free(struct TemporalCoreConnection *client)
      * }
      */
     public static void temporal_core_client_free(MemorySegment client) {
@@ -677,7 +677,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static FunctionDescriptor temporal_core_client_update_metadata$descriptor() {
@@ -687,7 +687,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static MethodHandle temporal_core_client_update_metadata$handle() {
@@ -697,7 +697,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static MemorySegment temporal_core_client_update_metadata$address() {
@@ -706,7 +706,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * void temporal_core_client_update_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static void temporal_core_client_update_metadata(MemorySegment client, MemorySegment metadata) {
@@ -737,7 +737,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_binary_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_binary_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static FunctionDescriptor temporal_core_client_update_binary_metadata$descriptor() {
@@ -747,7 +747,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_binary_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_binary_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static MethodHandle temporal_core_client_update_binary_metadata$handle() {
@@ -757,7 +757,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_binary_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_binary_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static MemorySegment temporal_core_client_update_binary_metadata$address() {
@@ -766,7 +766,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * void temporal_core_client_update_binary_metadata(struct TemporalCoreClient *client, TemporalCoreMetadataRef metadata)
+     * void temporal_core_client_update_binary_metadata(struct TemporalCoreConnection *client, TemporalCoreMetadataRef metadata)
      * }
      */
     public static void temporal_core_client_update_binary_metadata(MemorySegment client, MemorySegment metadata) {
@@ -797,7 +797,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_api_key(struct TemporalCoreClient *client, struct TemporalCoreByteArrayRef api_key)
+     * void temporal_core_client_update_api_key(struct TemporalCoreConnection *client, struct TemporalCoreByteArrayRef api_key)
      * }
      */
     public static FunctionDescriptor temporal_core_client_update_api_key$descriptor() {
@@ -807,7 +807,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_api_key(struct TemporalCoreClient *client, struct TemporalCoreByteArrayRef api_key)
+     * void temporal_core_client_update_api_key(struct TemporalCoreConnection *client, struct TemporalCoreByteArrayRef api_key)
      * }
      */
     public static MethodHandle temporal_core_client_update_api_key$handle() {
@@ -817,7 +817,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * void temporal_core_client_update_api_key(struct TemporalCoreClient *client, struct TemporalCoreByteArrayRef api_key)
+     * void temporal_core_client_update_api_key(struct TemporalCoreConnection *client, struct TemporalCoreByteArrayRef api_key)
      * }
      */
     public static MemorySegment temporal_core_client_update_api_key$address() {
@@ -826,7 +826,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * void temporal_core_client_update_api_key(struct TemporalCoreClient *client, struct TemporalCoreByteArrayRef api_key)
+     * void temporal_core_client_update_api_key(struct TemporalCoreConnection *client, struct TemporalCoreByteArrayRef api_key)
      * }
      */
     public static void temporal_core_client_update_api_key(MemorySegment client, MemorySegment api_key) {
@@ -1159,7 +1159,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * void temporal_core_client_rpc_call(struct TemporalCoreClient *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
+     * void temporal_core_client_rpc_call(struct TemporalCoreConnection *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
      * }
      */
     public static FunctionDescriptor temporal_core_client_rpc_call$descriptor() {
@@ -1169,7 +1169,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * void temporal_core_client_rpc_call(struct TemporalCoreClient *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
+     * void temporal_core_client_rpc_call(struct TemporalCoreConnection *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
      * }
      */
     public static MethodHandle temporal_core_client_rpc_call$handle() {
@@ -1179,7 +1179,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * void temporal_core_client_rpc_call(struct TemporalCoreClient *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
+     * void temporal_core_client_rpc_call(struct TemporalCoreConnection *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
      * }
      */
     public static MemorySegment temporal_core_client_rpc_call$address() {
@@ -1188,7 +1188,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * void temporal_core_client_rpc_call(struct TemporalCoreClient *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
+     * void temporal_core_client_rpc_call(struct TemporalCoreConnection *client, const struct TemporalCoreRpcCallOptions *options, void *user_data, TemporalCoreClientRpcCallCallback callback)
      * }
      */
     public static void temporal_core_client_rpc_call(MemorySegment client, MemorySegment options, MemorySegment user_data, MemorySegment callback) {
@@ -2914,7 +2914,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreClient *client, const struct TemporalCoreWorkerOptions *options)
+     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreConnection *connection, const struct TemporalCoreWorkerOptions *options)
      * }
      */
     public static FunctionDescriptor temporal_core_worker_new$descriptor() {
@@ -2924,7 +2924,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreClient *client, const struct TemporalCoreWorkerOptions *options)
+     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreConnection *connection, const struct TemporalCoreWorkerOptions *options)
      * }
      */
     public static MethodHandle temporal_core_worker_new$handle() {
@@ -2934,7 +2934,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreClient *client, const struct TemporalCoreWorkerOptions *options)
+     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreConnection *connection, const struct TemporalCoreWorkerOptions *options)
      * }
      */
     public static MemorySegment temporal_core_worker_new$address() {
@@ -2943,16 +2943,16 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreClient *client, const struct TemporalCoreWorkerOptions *options)
+     * struct TemporalCoreWorkerOrFail temporal_core_worker_new(struct TemporalCoreConnection *connection, const struct TemporalCoreWorkerOptions *options)
      * }
      */
-    public static MemorySegment temporal_core_worker_new(SegmentAllocator allocator, MemorySegment client, MemorySegment options) {
+    public static MemorySegment temporal_core_worker_new(SegmentAllocator allocator, MemorySegment connection, MemorySegment options) {
         var mh$ = temporal_core_worker_new.HANDLE;
         try {
             if (TRACE_DOWNCALLS) {
-                traceDowncall("temporal_core_worker_new", allocator, client, options);
+                traceDowncall("temporal_core_worker_new", allocator, connection, options);
             }
-            return (MemorySegment)mh$.invokeExact(allocator, client, options);
+            return (MemorySegment)mh$.invokeExact(allocator, connection, options);
         } catch (Error | RuntimeException ex) {
            throw ex;
         } catch (Throwable ex$) {
@@ -3095,7 +3095,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Function descriptor for:
      * {@snippet lang=c :
-     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreClient *new_client)
+     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreConnection *new_connection)
      * }
      */
     public static FunctionDescriptor temporal_core_worker_replace_client$descriptor() {
@@ -3105,7 +3105,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Downcall method handle for:
      * {@snippet lang=c :
-     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreClient *new_client)
+     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreConnection *new_connection)
      * }
      */
     public static MethodHandle temporal_core_worker_replace_client$handle() {
@@ -3115,7 +3115,7 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
     /**
      * Address for:
      * {@snippet lang=c :
-     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreClient *new_client)
+     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreConnection *new_connection)
      * }
      */
     public static MemorySegment temporal_core_worker_replace_client$address() {
@@ -3124,16 +3124,16 @@ public class temporal_sdk_core_c_bridge_h extends temporal_sdk_core_c_bridge_h$s
 
     /**
      * {@snippet lang=c :
-     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreClient *new_client)
+     * const struct TemporalCoreByteArray *temporal_core_worker_replace_client(struct TemporalCoreWorker *worker, struct TemporalCoreConnection *new_connection)
      * }
      */
-    public static MemorySegment temporal_core_worker_replace_client(MemorySegment worker, MemorySegment new_client) {
+    public static MemorySegment temporal_core_worker_replace_client(MemorySegment worker, MemorySegment new_connection) {
         var mh$ = temporal_core_worker_replace_client.HANDLE;
         try {
             if (TRACE_DOWNCALLS) {
-                traceDowncall("temporal_core_worker_replace_client", worker, new_client);
+                traceDowncall("temporal_core_worker_replace_client", worker, new_connection);
             }
-            return (MemorySegment)mh$.invokeExact(worker, new_client);
+            return (MemorySegment)mh$.invokeExact(worker, new_connection);
         } catch (Error | RuntimeException ex) {
            throw ex;
         } catch (Throwable ex$) {

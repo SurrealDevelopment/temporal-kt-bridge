@@ -65,7 +65,7 @@ object NativeLoader {
                     Or specify the classifier directly:
                       runtimeOnly("com.surrealdev.temporal:core-bridge:VERSION:$${platform.mavenClassifier}")
 
-                    Supported classifiers: linux-x86_64-gnu, linux-aarch64-gnu, macos-x86_64, macos-aarch64, windows-x86_64
+                    Supported classifiers: linux-x86_64-gnu, linux-aarch64-gnu, macos-aarch64, windows-x86_64
                     """.trimIndent(),
                 )
 

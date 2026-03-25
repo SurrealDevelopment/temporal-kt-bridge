@@ -14,7 +14,7 @@ import static java.lang.foreign.MemoryLayout.PathElement.*;
 
 /**
  * {@snippet lang=c :
- * struct TemporalCoreClientOptions {
+ * struct TemporalCoreConnectionOptions {
  *     struct TemporalCoreByteArrayRef target_url;
  *     struct TemporalCoreByteArrayRef client_name;
  *     struct TemporalCoreByteArrayRef client_version;
@@ -31,9 +31,9 @@ import static java.lang.foreign.MemoryLayout.PathElement.*;
  * }
  * }
  */
-public class TemporalCoreClientOptions {
+public class TemporalCoreConnectionOptions {
 
-    TemporalCoreClientOptions() {
+    TemporalCoreConnectionOptions() {
         // Should not be called directly
     }
 
@@ -51,7 +51,7 @@ public class TemporalCoreClientOptions {
         temporal_sdk_core_c_bridge_h.C_POINTER.withName("http_connect_proxy_options"),
         temporal_sdk_core_c_bridge_h.C_POINTER.withName("grpc_override_callback"),
         temporal_sdk_core_c_bridge_h.C_POINTER.withName("grpc_override_callback_user_data")
-    ).withName("TemporalCoreClientOptions");
+    ).withName("TemporalCoreConnectionOptions");
 
     /**
      * The layout of this struct

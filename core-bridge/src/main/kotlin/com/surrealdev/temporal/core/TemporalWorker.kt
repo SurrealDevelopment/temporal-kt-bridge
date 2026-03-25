@@ -42,6 +42,7 @@ class TemporalWorker private constructor(
     private val dispatcher: WorkerCallbackDispatcher,
     val taskQueue: String,
     val namespace: String,
+    val slotSupplierBridges: List<SlotSupplierBridgeEntry> = emptyList(),
 ) : AutoCloseable {
     @Volatile
     private var closed = false
@@ -74,7 +75,7 @@ class TemporalWorker private constructor(
             client.ensureOpen()
 
             return FactoryArenaScope.create(runtime.handle, ::WorkerCallbackDispatcher).createResource {
-                val workerPtr =
+                val result =
                     InternalWorker.createWorker(
                         clientPtr = client.handle,
                         arena = resourceArena,
@@ -83,12 +84,13 @@ class TemporalWorker private constructor(
                         config = config,
                     )
                 TemporalWorker(
-                    handle = workerPtr,
+                    handle = result.workerPtr,
                     arena = resourceArena,
                     callbackArena = callbackArena,
                     dispatcher = dispatcher,
                     taskQueue = taskQueue,
                     namespace = namespace,
+                    slotSupplierBridges = result.slotSupplierBridges,
                 )
             }
         }

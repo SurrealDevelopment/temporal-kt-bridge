@@ -1,8 +1,8 @@
 package com.surrealdev.temporal.core.internal
 
 import io.temporal.sdkbridge.TemporalCoreByteArrayRefArray
-import io.temporal.sdkbridge.TemporalCoreClientOptions
 import io.temporal.sdkbridge.TemporalCoreClientTlsOptions
+import io.temporal.sdkbridge.TemporalCoreConnectionOptions
 import io.temporal.sdkbridge.TemporalCoreRpcCallOptions
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
@@ -369,21 +369,30 @@ internal object TemporalCoreClient {
         tls: ClientTlsOptions?,
         apiKey: String? = null,
     ): MemorySegment {
-        val options = TemporalCoreClientOptions.allocate(arena)
+        val options = TemporalCoreConnectionOptions.allocate(arena)
 
-        TemporalCoreClientOptions.target_url(options, TemporalCoreFfmUtil.createByteArrayRef(arena, targetUrl))
-        TemporalCoreClientOptions.client_name(options, TemporalCoreFfmUtil.createByteArrayRef(arena, clientName))
-        TemporalCoreClientOptions.client_version(options, TemporalCoreFfmUtil.createByteArrayRef(arena, clientVersion))
-        TemporalCoreClientOptions.metadata(options, createEmptyMetadataRef(arena))
-        TemporalCoreClientOptions.binary_metadata(options, createEmptyMetadataRef(arena))
-        TemporalCoreClientOptions.api_key(options, TemporalCoreFfmUtil.createByteArrayRef(arena, apiKey))
-        TemporalCoreClientOptions.identity(options, TemporalCoreFfmUtil.createByteArrayRef(arena, identity))
-        TemporalCoreClientOptions.tls_options(options, buildTlsOptions(arena, tls))
-        TemporalCoreClientOptions.retry_options(options, MemorySegment.NULL)
-        TemporalCoreClientOptions.keep_alive_options(options, MemorySegment.NULL)
-        TemporalCoreClientOptions.http_connect_proxy_options(options, MemorySegment.NULL)
-        TemporalCoreClientOptions.grpc_override_callback(options, MemorySegment.NULL)
-        TemporalCoreClientOptions.grpc_override_callback_user_data(options, MemorySegment.NULL)
+        TemporalCoreConnectionOptions.target_url(
+            options,
+            TemporalCoreFfmUtil.createByteArrayRef(arena, targetUrl),
+        )
+        TemporalCoreConnectionOptions.client_name(
+            options,
+            TemporalCoreFfmUtil.createByteArrayRef(arena, clientName),
+        )
+        TemporalCoreConnectionOptions.client_version(
+            options,
+            TemporalCoreFfmUtil.createByteArrayRef(arena, clientVersion),
+        )
+        TemporalCoreConnectionOptions.metadata(options, createEmptyMetadataRef(arena))
+        TemporalCoreConnectionOptions.binary_metadata(options, createEmptyMetadataRef(arena))
+        TemporalCoreConnectionOptions.api_key(options, TemporalCoreFfmUtil.createByteArrayRef(arena, apiKey))
+        TemporalCoreConnectionOptions.identity(options, TemporalCoreFfmUtil.createByteArrayRef(arena, identity))
+        TemporalCoreConnectionOptions.tls_options(options, buildTlsOptions(arena, tls))
+        TemporalCoreConnectionOptions.retry_options(options, MemorySegment.NULL)
+        TemporalCoreConnectionOptions.keep_alive_options(options, MemorySegment.NULL)
+        TemporalCoreConnectionOptions.http_connect_proxy_options(options, MemorySegment.NULL)
+        TemporalCoreConnectionOptions.grpc_override_callback(options, MemorySegment.NULL)
+        TemporalCoreConnectionOptions.grpc_override_callback_user_data(options, MemorySegment.NULL)
 
         return options
     }

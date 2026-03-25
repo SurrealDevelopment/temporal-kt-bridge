@@ -10,15 +10,25 @@ data class WorkerConfig(
     val enableNexus: Boolean = false,
     val deploymentOptions: WorkerDeploymentOptions? = null,
     /**
-     * Maximum number of concurrent workflow task executions.
+     * Slot supplier for workflow task executions.
      * Controls the Core SDK's workflow slot supplier.
      */
-    val maxConcurrentWorkflowTasks: Int = 100,
+    val workflowSlotSupplier: SlotSupplier = SlotSupplier.FixedSize(10),
     /**
-     * Maximum number of concurrent activity executions.
+     * Slot supplier for activity executions.
      * Controls the Core SDK's activity slot supplier.
      */
-    val maxConcurrentActivities: Int = 100,
+    val activitySlotSupplier: SlotSupplier = SlotSupplier.FixedSize(10),
+    /**
+     * Slot supplier for local activity executions.
+     * Controls the Core SDK's local activity slot supplier.
+     */
+    val localActivitySlotSupplier: SlotSupplier = SlotSupplier.FixedSize(10),
+    /**
+     * Slot supplier for nexus task executions.
+     * Controls the Core SDK's nexus task slot supplier.
+     */
+    val nexusSlotSupplier: SlotSupplier = SlotSupplier.FixedSize(10),
     /**
      * Maximum interval for throttling activity heartbeats in milliseconds.
      * Heartbeats will be throttled to at most this interval.

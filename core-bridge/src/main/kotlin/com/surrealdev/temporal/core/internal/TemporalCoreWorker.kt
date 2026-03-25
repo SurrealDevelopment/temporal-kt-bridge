@@ -1,15 +1,28 @@
 package com.surrealdev.temporal.core.internal
 
 import com.surrealdev.temporal.core.CorePollerBehavior
+import com.surrealdev.temporal.core.SlotSupplier
+import com.surrealdev.temporal.core.SlotSupplierBridgeEntry
 import com.surrealdev.temporal.core.TemporalCoreException
 import com.surrealdev.temporal.core.WorkerConfig
 import com.surrealdev.temporal.core.WorkerDeploymentOptions
 import io.temporal.sdkbridge.TemporalCoreByteArrayRef
 import io.temporal.sdkbridge.TemporalCoreByteArrayRefArray
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierAvailableSlotsCallback
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierCallbacksImpl
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierCallbacksStruct
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierCancelReserveCallback
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierFreeCallback
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierMarkUsedCallback
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierReleaseCallback
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierReserveCallback
+import io.temporal.sdkbridge.TemporalCoreCustomSlotSupplierTryReserveCallback
 import io.temporal.sdkbridge.TemporalCoreFixedSizeSlotSupplier
 import io.temporal.sdkbridge.TemporalCorePollerBehavior
 import io.temporal.sdkbridge.TemporalCorePollerBehaviorAutoscaling
 import io.temporal.sdkbridge.TemporalCorePollerBehaviorSimpleMaximum
+import io.temporal.sdkbridge.TemporalCoreResourceBasedSlotSupplier
+import io.temporal.sdkbridge.TemporalCoreResourceBasedTunerOptions
 import io.temporal.sdkbridge.TemporalCoreSlotSupplier
 import io.temporal.sdkbridge.TemporalCoreTunerHolder
 import io.temporal.sdkbridge.TemporalCoreWorkerDeploymentOptions
@@ -56,6 +69,11 @@ internal object TemporalCoreWorker {
     // Worker Creation API
     // ============================================================
 
+    data class CreateWorkerResult(
+        val workerPtr: MemorySegment,
+        val slotSupplierBridges: List<SlotSupplierBridgeEntry>,
+    )
+
     /**
      * Creates a new worker.
      *
@@ -76,8 +94,9 @@ internal object TemporalCoreWorker {
         namespace: String,
         taskQueue: String,
         config: WorkerConfig = WorkerConfig(),
-    ): MemorySegment {
-        val options = buildWorkerOptions(arena, namespace, taskQueue, config)
+    ): CreateWorkerResult {
+        val bridges = mutableListOf<SlotSupplierBridgeEntry>()
+        val options = buildWorkerOptions(arena, namespace, taskQueue, config, bridges)
 
         val result = CoreBridge.temporal_core_worker_new(arena, clientPtr, options)
 
@@ -89,7 +108,7 @@ internal object TemporalCoreWorker {
             throw TemporalCoreException(errorMessage ?: "Unknown error creating worker")
         }
 
-        return workerPtr
+        return CreateWorkerResult(workerPtr, bridges)
     }
 
     /**
@@ -484,31 +503,6 @@ internal object TemporalCoreWorker {
     }
 
     // ============================================================
-    // Slot Supplier API
-    // ============================================================
-
-    /**
-     * Completes an async slot reserve operation.
-     *
-     * @param completionCtx The completion context
-     * @param permitId The permit ID
-     * @return True if successful
-     */
-    fun completeAsyncReserve(
-        completionCtx: MemorySegment,
-        permitId: Long,
-    ): Boolean = CoreBridge.temporal_core_complete_async_reserve(completionCtx, permitId)
-
-    /**
-     * Completes an async cancel reserve operation.
-     *
-     * @param completionCtx The completion context
-     * @return True if successful
-     */
-    fun completeAsyncCancelReserve(completionCtx: MemorySegment): Boolean =
-        CoreBridge.temporal_core_complete_async_cancel_reserve(completionCtx)
-
-    // ============================================================
     // Helper Functions
     // ============================================================
 
@@ -517,6 +511,7 @@ internal object TemporalCoreWorker {
         namespace: String,
         taskQueue: String,
         config: WorkerConfig,
+        bridges: MutableList<SlotSupplierBridgeEntry> = mutableListOf(),
     ): MemorySegment {
         val options = TemporalCoreWorkerOptions.allocate(arena)
 
@@ -544,24 +539,38 @@ internal object TemporalCoreWorker {
         TemporalCoreWorkerTaskTypes.enable_nexus(taskTypes, config.enableNexus)
         TemporalCoreWorkerOptions.task_types(options, taskTypes)
 
-        // Initialize tuner with fixed-size slot suppliers
+        // Initialize tuner with slot suppliers
         val tuner = TemporalCoreWorkerOptions.tuner(options)
         initializeSlotSupplier(
             TemporalCoreTunerHolder.workflow_slot_supplier(tuner),
-            config.maxConcurrentWorkflowTasks.toLong(),
+            config.workflowSlotSupplier,
+            arena,
+            bridges,
+            "workflow",
         )
         initializeSlotSupplier(
             TemporalCoreTunerHolder.activity_slot_supplier(tuner),
-            config.maxConcurrentActivities.toLong(),
+            config.activitySlotSupplier,
+            arena,
+            bridges,
+            "activity",
         )
         initializeSlotSupplier(
             TemporalCoreTunerHolder.local_activity_slot_supplier(tuner),
-            config.maxConcurrentActivities.toLong(),
+            config.localActivitySlotSupplier,
+            arena,
+            bridges,
+            "local_activity",
         )
-        initializeSlotSupplier(TemporalCoreTunerHolder.nexus_task_slot_supplier(tuner), 100)
+        initializeSlotSupplier(
+            TemporalCoreTunerHolder.nexus_task_slot_supplier(tuner),
+            config.nexusSlotSupplier,
+            arena,
+            bridges,
+            "nexus",
+        )
 
         // Set timeouts and limits
-        TemporalCoreWorkerOptions.sticky_queue_schedule_to_start_timeout_millis(options, 10_000L)
         TemporalCoreWorkerOptions.max_heartbeat_throttle_interval_millis(
             options,
             config.maxHeartbeatThrottleIntervalMs,
@@ -603,6 +612,7 @@ internal object TemporalCoreWorker {
             config.nondeterminismAsWorkflowFailForTypes.toFfmByteArrayRefArray(arena),
         )
         TemporalCoreWorkerOptions.plugins(options, createEmptyByteArrayRefArray(arena))
+        TemporalCoreWorkerOptions.storage_drivers(options, createEmptyByteArrayRefArray(arena))
 
         return options
     }
@@ -685,14 +695,71 @@ internal object TemporalCoreWorker {
         return arr
     }
 
+    @Suppress("DEPRECATION")
     private fun initializeSlotSupplier(
         slotSupplier: MemorySegment,
-        numSlots: Long,
+        config: SlotSupplier,
+        arena: Arena,
+        bridges: MutableList<SlotSupplierBridgeEntry>,
+        slotType: String = "",
     ) {
-        // Set tag to FixedSize (0)
-        TemporalCoreSlotSupplier.tag(slotSupplier, CoreBridge.FixedSize())
-        // Set num_slots in the fixed_size union member
-        val fixedSize = TemporalCoreSlotSupplier.fixed_size(slotSupplier)
-        TemporalCoreFixedSizeSlotSupplier.num_slots(fixedSize, numSlots)
+        when (config) {
+            is SlotSupplier.FixedSize -> {
+                TemporalCoreSlotSupplier.tag(slotSupplier, CoreBridge.FixedSize())
+                val fixedSize = TemporalCoreSlotSupplier.fixed_size(slotSupplier)
+                TemporalCoreFixedSizeSlotSupplier.num_slots(fixedSize, config.slots.toLong())
+            }
+
+            is SlotSupplier.CGroupResourceBased -> {
+                TemporalCoreSlotSupplier.tag(slotSupplier, CoreBridge.ResourceBased())
+                val resourceBased = TemporalCoreSlotSupplier.resource_based(slotSupplier)
+                TemporalCoreResourceBasedSlotSupplier.minimum_slots(resourceBased, config.minimumSlots.toLong())
+                TemporalCoreResourceBasedSlotSupplier.maximum_slots(resourceBased, config.maximumSlots.toLong())
+                TemporalCoreResourceBasedSlotSupplier.ramp_throttle_ms(resourceBased, config.rampThrottleMs)
+                val tunerOptions = TemporalCoreResourceBasedSlotSupplier.tuner_options(resourceBased)
+                TemporalCoreResourceBasedTunerOptions.target_memory_usage(tunerOptions, config.targetMemoryUsage)
+                TemporalCoreResourceBasedTunerOptions.target_cpu_usage(tunerOptions, config.targetCpuUsage)
+            }
+
+            is SlotSupplier.JvmResourceBased -> {
+                TemporalCoreSlotSupplier.tag(slotSupplier, CoreBridge.Custom())
+                val bridge = CustomSlotSupplierBridge(config.maximumSlots, config.minimumSlots)
+                bridges.add(SlotSupplierBridgeEntry(slotType, bridge))
+
+                val callbacks = TemporalCoreCustomSlotSupplierCallbacksStruct.allocate(arena)
+                TemporalCoreCustomSlotSupplierCallbacksStruct.reserve(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierReserveCallback.allocate(bridge::onReserve, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.cancel_reserve(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierCancelReserveCallback.allocate(bridge::onCancelReserve, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.try_reserve(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierTryReserveCallback.allocate(bridge::onTryReserve, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.mark_used(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierMarkUsedCallback.allocate(bridge::onMarkUsed, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.release(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierReleaseCallback.allocate(bridge::onRelease, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.available_slots(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierAvailableSlotsCallback.allocate(bridge::onAvailableSlots, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.free(
+                    callbacks,
+                    TemporalCoreCustomSlotSupplierFreeCallback.allocate(bridge::onFree, arena),
+                )
+                TemporalCoreCustomSlotSupplierCallbacksStruct.user_data(callbacks, MemorySegment.NULL)
+
+                val customImpl = TemporalCoreSlotSupplier.custom(slotSupplier)
+                TemporalCoreCustomSlotSupplierCallbacksImpl._0(customImpl, callbacks)
+            }
+        }
     }
 }
