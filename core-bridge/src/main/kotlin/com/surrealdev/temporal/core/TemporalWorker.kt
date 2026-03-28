@@ -117,6 +117,29 @@ class TemporalWorker private constructor(
     }
 
     /**
+     * Validates this worker against the Temporal server.
+     * Should be called after worker creation but before polling starts.
+     *
+     * @throws TemporalCoreException if validation fails
+     */
+    suspend fun validate() {
+        ensureOpen()
+        suspendCancellableCoroutine { continuation ->
+            val callback =
+                InternalWorker.WorkerCallback { error ->
+                    if (error != null) {
+                        continuation.resumeWithException(TemporalCoreException(error))
+                    } else {
+                        continuation.resume(Unit)
+                    }
+                }
+            InternalWorker.validate(handle, dispatcher, callback)
+            // Note: We intentionally do NOT cancel on coroutine cancellation.
+            // The Rust callback will always fire, and we must wait for it to complete.
+        }
+    }
+
+    /**
      * Polls for a workflow activation with zero-copy protobuf parsing.
      *
      * This method suspends until a workflow activation is available or shutdown is complete.

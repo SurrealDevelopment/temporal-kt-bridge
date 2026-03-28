@@ -528,14 +528,14 @@ internal object TemporalCoreWorker {
 
         TemporalCoreWorkerOptions.versioning_strategy(
             options,
-            config.deploymentOptions.toFfmVersioningStrategy(arena),
+            config.deploymentOptions.toFfmVersioningStrategy(arena, config.buildId),
         )
 
         // Set task types
         val taskTypes = TemporalCoreWorkerTaskTypes.allocate(arena)
         TemporalCoreWorkerTaskTypes.enable_workflows(taskTypes, config.enableWorkflows)
         TemporalCoreWorkerTaskTypes.enable_remote_activities(taskTypes, config.enableActivities)
-        TemporalCoreWorkerTaskTypes.enable_local_activities(taskTypes, config.enableActivities)
+        TemporalCoreWorkerTaskTypes.enable_local_activities(taskTypes, config.enableLocalActivities)
         TemporalCoreWorkerTaskTypes.enable_nexus(taskTypes, config.enableNexus)
         TemporalCoreWorkerOptions.task_types(options, taskTypes)
 
@@ -584,7 +584,7 @@ internal object TemporalCoreWorker {
             options,
             config.maxTaskQueueActivitiesPerSecond,
         )
-        TemporalCoreWorkerOptions.graceful_shutdown_period_millis(options, 0L)
+        TemporalCoreWorkerOptions.graceful_shutdown_period_millis(options, config.gracefulShutdownPeriodMs)
         TemporalCoreWorkerOptions.sticky_queue_schedule_to_start_timeout_millis(
             options,
             config.stickyQueueScheduleToStartTimeoutMs,
@@ -602,7 +602,7 @@ internal object TemporalCoreWorker {
         )
         TemporalCoreWorkerOptions.nexus_task_poller_behavior(
             options,
-            CorePollerBehavior.SimpleMaximum(2).toFfm(arena),
+            config.nexusPollerBehavior.toFfm(arena),
         )
 
         // Set nondeterminism options
@@ -640,7 +640,10 @@ internal object TemporalCoreWorker {
         }
     }
 
-    private fun WorkerDeploymentOptions?.toFfmVersioningStrategy(arena: Arena): MemorySegment {
+    private fun WorkerDeploymentOptions?.toFfmVersioningStrategy(
+        arena: Arena,
+        buildId: String = "",
+    ): MemorySegment {
         val strategy = TemporalCoreWorkerVersioningStrategy.allocate(arena)
         if (this != null) {
             TemporalCoreWorkerVersioningStrategy.tag(strategy, CoreBridge.DeploymentBased())
@@ -661,7 +664,12 @@ internal object TemporalCoreWorker {
             )
         } else {
             TemporalCoreWorkerVersioningStrategy.tag(strategy, CoreBridge.None())
-            TemporalCoreWorkerVersioningStrategy.none(strategy, TemporalCoreWorkerVersioningNone.allocate(arena))
+            val noneStrategy = TemporalCoreWorkerVersioningNone.allocate(arena)
+            TemporalCoreWorkerVersioningNone.build_id(
+                noneStrategy,
+                TemporalCoreFfmUtil.createByteArrayRef(arena, buildId),
+            )
+            TemporalCoreWorkerVersioningStrategy.none(strategy, noneStrategy)
         }
         return strategy
     }

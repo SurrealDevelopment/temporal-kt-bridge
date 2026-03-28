@@ -1,6 +1,7 @@
 package com.surrealdev.temporal.core.internal
 
 import io.temporal.sdkbridge.TemporalCoreByteArrayRefArray
+import io.temporal.sdkbridge.TemporalCoreClientKeepAliveOptions
 import io.temporal.sdkbridge.TemporalCoreClientTlsOptions
 import io.temporal.sdkbridge.TemporalCoreConnectionOptions
 import io.temporal.sdkbridge.TemporalCoreRpcCallOptions
@@ -389,7 +390,10 @@ internal object TemporalCoreClient {
         TemporalCoreConnectionOptions.identity(options, TemporalCoreFfmUtil.createByteArrayRef(arena, identity))
         TemporalCoreConnectionOptions.tls_options(options, buildTlsOptions(arena, tls))
         TemporalCoreConnectionOptions.retry_options(options, MemorySegment.NULL)
-        TemporalCoreConnectionOptions.keep_alive_options(options, MemorySegment.NULL)
+        val keepAlive = TemporalCoreClientKeepAliveOptions.allocate(arena)
+        TemporalCoreClientKeepAliveOptions.interval_millis(keepAlive, 30_000L)
+        TemporalCoreClientKeepAliveOptions.timeout_millis(keepAlive, 15_000L)
+        TemporalCoreConnectionOptions.keep_alive_options(options, keepAlive)
         TemporalCoreConnectionOptions.http_connect_proxy_options(options, MemorySegment.NULL)
         TemporalCoreConnectionOptions.grpc_override_callback(options, MemorySegment.NULL)
         TemporalCoreConnectionOptions.grpc_override_callback_user_data(options, MemorySegment.NULL)

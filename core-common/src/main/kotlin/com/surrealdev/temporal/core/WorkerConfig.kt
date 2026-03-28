@@ -7,6 +7,7 @@ data class WorkerConfig(
     val maxCachedWorkflows: Int = 1000,
     val enableWorkflows: Boolean = true,
     val enableActivities: Boolean = true,
+    val enableLocalActivities: Boolean = true,
     val enableNexus: Boolean = false,
     val deploymentOptions: WorkerDeploymentOptions? = null,
     /**
@@ -50,6 +51,11 @@ data class WorkerConfig(
      * issued to the Temporal server for activity tasks.
      */
     val activityPollerBehavior: CorePollerBehavior = CorePollerBehavior.SimpleMaximum(5),
+    /**
+     * Poller behavior for nexus tasks. Controls how many concurrent gRPC long-polls are
+     * issued to the Temporal server for nexus tasks.
+     */
+    val nexusPollerBehavior: CorePollerBehavior = CorePollerBehavior.SimpleMaximum(2),
     /**
      * Maximum number of activities per second this worker will execute, regardless of task queue
      * capacity. Use to protect downstream services from burst load. 0.0 means no limit.
@@ -107,4 +113,18 @@ data class WorkerConfig(
      * Default: 10,000ms (10 seconds)
      */
     val stickyQueueScheduleToStartTimeoutMs: Long = 10_000L,
+    /**
+     * Grace period in milliseconds after shutdown is initiated before the Core SDK
+     * auto-cancels outstanding activities and nexus operations.
+     *
+     * Default: 0 (immediate cancellation at Core level).
+     */
+    val gracefulShutdownPeriodMs: Long = 0L,
+    /**
+     * Build ID identifying this worker build, sent to the server in heartbeats
+     * and visible in the Temporal UI. Only used when no deployment options are configured.
+     *
+     * Default: empty string (no build identifier).
+     */
+    val buildId: String = "",
 )

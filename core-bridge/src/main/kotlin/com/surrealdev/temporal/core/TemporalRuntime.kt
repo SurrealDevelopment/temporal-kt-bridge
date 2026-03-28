@@ -57,7 +57,10 @@ class TemporalRuntime private constructor(
          * @return A new TemporalRuntime instance
          * @throws TemporalCoreException if runtime creation fails
          */
-        fun create(coreMetricsMeter: Any?): TemporalRuntime {
+        fun create(
+            coreMetricsMeter: Any?,
+            workerHeartbeatIntervalMs: Long = 60_000L,
+        ): TemporalRuntime {
             val bridge =
                 if (coreMetricsMeter != null) {
                     CoreMetricsBridge(coreMetricsMeter as Meter)
@@ -70,9 +73,9 @@ class TemporalRuntime private constructor(
                 val handle =
                     if (bridge != null) {
                         val telemetryOptions = bridge.buildTelemetryOptions()
-                        TemporalCoreRuntime.createRuntime(arena, telemetryOptions)
+                        TemporalCoreRuntime.createRuntime(arena, telemetryOptions, workerHeartbeatIntervalMs)
                     } else {
-                        TemporalCoreRuntime.createRuntime(arena)
+                        TemporalCoreRuntime.createRuntime(arena, MemorySegment.NULL, workerHeartbeatIntervalMs)
                     }
                 TemporalRuntime(handle, arena, bridge)
             } catch (e: Exception) {
