@@ -21,12 +21,12 @@ class TemporalCoreClientTest {
                     val client =
                         TemporalCoreClient.connect(
                             runtime = runtime,
-                            targetUrl = "http://${server.targetUrl}",
+                            targetUrl = server.targetUrl,
                             namespace = "default",
                         )
                     client.use { client ->
                         assertFalse(client.isClosed())
-                        assertEquals("http://${server.targetUrl}", client.targetUrl)
+                        assertEquals("http://${server.targetUrl}", client.targetUrl) // normalized with scheme
                         assertEquals("default", client.namespace)
                     }
                     assertTrue(client.isClosed())
@@ -42,7 +42,7 @@ class TemporalCoreClientTest {
                     val client =
                         TemporalCoreClient.connect(
                             runtime = runtime,
-                            targetUrl = "http://${server.targetUrl}",
+                            targetUrl = server.targetUrl,
                             namespace = "default",
                         )
                     assertFalse(client.isClosed())
@@ -69,7 +69,7 @@ class TemporalCoreClientTest {
                     val client =
                         TemporalCoreClient.connect(
                             runtime = runtime,
-                            targetUrl = "http://${server.targetUrl}",
+                            targetUrl = server.targetUrl,
                             namespace = "test-namespace",
                             options = options,
                         )

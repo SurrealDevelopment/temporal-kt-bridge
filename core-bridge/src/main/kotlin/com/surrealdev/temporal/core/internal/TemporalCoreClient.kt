@@ -148,7 +148,7 @@ internal object TemporalCoreClient {
      * @param runtimePtr Pointer to the runtime
      * @param optionsArena Arena for allocating connection options (caller manages lifecycle)
      * @param dispatcher The callback dispatcher with reusable stubs
-     * @param targetUrl The server URL (e.g., "http://localhost:7233")
+     * @param targetUrl The server address (e.g., "localhost:7233"). Scheme is optional.
      * @param namespace The namespace to use
      * @param tls TLS configuration, or null for no TLS
      * @param callback Callback invoked when connection completes

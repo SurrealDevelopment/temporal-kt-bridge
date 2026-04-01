@@ -39,7 +39,7 @@ private fun TlsConfig.toClientTlsOptions(): ClientTlsOptions =
  * Example usage:
  * ```kotlin
  * TemporalRuntime.create().use { runtime ->
- *     val client = TemporalCoreClient.connect(runtime, "http://localhost:7233", "default")
+ *     val client = TemporalCoreClient.connect(runtime, "localhost:7233", "default")
  *     try {
  *         // Use the client...
  *     } finally {
@@ -59,9 +59,9 @@ class TemporalCoreClient private constructor(
     @Volatile
     private var closed = false
 
-    private val logger = LoggerFactory.getLogger(TemporalCoreClient::class.java)
-
     companion object {
+        private val logger = LoggerFactory.getLogger(TemporalCoreClient::class.java)
+
         /**
          * Connects to a Temporal server asynchronously.
          *
@@ -71,12 +71,15 @@ class TemporalCoreClient private constructor(
          * provide a [TlsConfig] instance.
          *
          * @param runtime The Temporal runtime to use
-         * @param targetUrl The server URL (e.g., "http://localhost:7233" or "https://my-namespace.tmprl.cloud:7233")
+         * @param targetUrl The server address (e.g., "localhost:7233" or "myns.tmprl.cloud:7233").
+         *                  Scheme is optional — if omitted, `http://` or `https://` is inferred from TLS settings.
          * @param namespace The namespace to use (default: "default")
          * @param options Additional client options
          * @param tls TLS configuration. If null and URL is https:// or apiKey is set, uses system CA certificates.
          *            Provide a [TlsConfig] for custom CA certificates, client certificates (mTLS), or domain overrides.
-         * @param apiKey API key for Temporal Cloud authentication (alternative to mTLS)
+         * @param apiKey API key for Temporal Cloud authentication (alternative to mTLS).
+         *               When set, TLS is auto-enabled unless [tlsDisabled] is true.
+         * @param tlsDisabled Explicitly disable TLS even when an API key is set. Useful for testing through proxies.
          * @return A connected client instance
          * @throws TemporalCoreException if connection fails
          */
@@ -87,20 +90,35 @@ class TemporalCoreClient private constructor(
             options: ClientOptions = ClientOptions(),
             tls: TlsConfig? = null,
             apiKey: String? = null,
+            tlsDisabled: Boolean = false,
         ): TemporalCoreClient {
             runtime.ensureOpen()
 
-            // Auto-enable TLS for https:// URLs or when API key is provided
+            // Warn about contradictory TLS configurations
+            if (tlsDisabled && tls != null) {
+                logger.warn("tlsDisabled=true but explicit TLS config was provided. TLS will NOT be used.")
+            }
+            if (tlsDisabled && targetUrl.startsWith("https://", ignoreCase = true)) {
+                logger.warn("tlsDisabled=true but target URL uses https:// scheme. TLS will NOT be used.")
+            }
+
+            // Determine effective TLS configuration
             val effectiveTls =
                 when {
+                    tlsDisabled -> null
                     tls != null -> tls.toClientTlsOptions()
-
                     targetUrl.startsWith("https://", ignoreCase = true) -> ClientTlsOptions()
-
                     apiKey != null -> ClientTlsOptions()
-
-                    // API key requires TLS
                     else -> null
+                }
+
+            // Normalize target URL — Rust Core SDK requires a scheme
+            val normalizedUrl =
+                when {
+                    targetUrl.startsWith("http://", ignoreCase = true) ||
+                        targetUrl.startsWith("https://", ignoreCase = true) -> targetUrl
+                    effectiveTls != null -> "https://$targetUrl"
+                    else -> "http://$targetUrl"
                 }
 
             val scope = FactoryArenaScope.create(runtime.handle, ::ClientCallbackDispatcher)
@@ -113,7 +131,7 @@ class TemporalCoreClient private constructor(
                                 runtimePtr = runtime.handle,
                                 optionsArena = scope.resourceArena,
                                 dispatcher = scope.dispatcher,
-                                targetUrl = targetUrl,
+                                targetUrl = normalizedUrl,
                                 namespace = namespace,
                                 clientName = options.clientName,
                                 clientVersion = options.clientVersion,
@@ -152,7 +170,7 @@ class TemporalCoreClient private constructor(
                     arena = scope.resourceArena,
                     callbackArena = scope.callbackArena,
                     dispatcher = scope.dispatcher,
-                    targetUrl = targetUrl,
+                    targetUrl = normalizedUrl,
                     namespace = namespace,
                 )
             } catch (e: Exception) {
