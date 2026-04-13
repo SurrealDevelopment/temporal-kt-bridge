@@ -117,7 +117,9 @@ class TemporalCoreClient private constructor(
                 when {
                     targetUrl.startsWith("http://", ignoreCase = true) ||
                         targetUrl.startsWith("https://", ignoreCase = true) -> targetUrl
+
                     effectiveTls != null -> "https://$targetUrl"
+
                     else -> "http://$targetUrl"
                 }
 
