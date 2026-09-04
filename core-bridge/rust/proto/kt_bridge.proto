@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package kt_bridge;
+
+// Configuration crosses the ABI as protobuf rather than as #[repr(C)] structs.
+//
+// This is the main reason the JVM binding layer shrinks from 21,589 hand-maintained lines to a
+// few hundred: WorkerOptions alone was 1,100 lines of Java MemoryLayout whose offsets had to be
+// mirrored by hand, where a mistake compiled cleanly and corrupted memory. Protobuf is built for
+// exactly this -- an unknown field is skipped, a missing field takes its default -- so adding an
+// option becomes a field addition rather than a coordinated layout change in two languages.
+// Config is not on any hot path; a few microseconds at construction is free.
+
+message RuntimeOptions {
+  TelemetryOptions telemetry = 1;
+}
+
+message TelemetryOptions {
+  // Core's own logs are forwarded to the JVM as Log completions rather than written by Core.
+  // Safe only because they land on a pump thread: calling SLF4J from a Rust callback thread is
+  // the pattern that produced the fillInStackTrace crash.
+  bool forward_logs = 1;
+  // tracing filter, e.g. "WARN" or "temporal_sdk_core=DEBUG".
+  string log_filter = 2;
+  string metrics_prometheus_bind_address = 3;
+  string metrics_otel_url = 4;
+}
+
+message RuntimeInfo {
+  string core_version = 1;
+  string prometheus_bind_address = 2;
+}
+
+message ServerLogLine {
+  bool stderr = 1;
+  string line = 2;
+}
+
+message LogRecord {
+  string target = 1;
+  string message = 2;
+  string fields_json = 3;
+}
