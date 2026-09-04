@@ -18,8 +18,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
+  # Publishing needs four repository secrets. Without them the publish step fails only after the
+  # 30-minute native matrix has run, so check first and skip the whole workflow cleanly instead.
+  # `secrets` is not available to a job-level `if`, hence a preflight job with an output.
+  preflight:
+    name: Check publishing credentials
+    runs-on: ubuntu-latest
+    outputs:
+      can-publish: ${{ steps.check.outputs.can-publish }}
+    steps:
+      - id: check
+        env:
+          OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -n "$OSSRH_USERNAME" ] && [ -n "$SIGNING_KEY" ]; then
+            echo "can-publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can-publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping publish: set OSSRH_USERNAME, OSSRH_TOKEN, SIGNING_KEY and SIGNING_PASSWORD to enable it."
+          fi
+
   build-native:
     name: Build native (${{ matrix.platform }})
+    needs: [preflight]
+    if: needs.preflight.outputs.can-publish == 'true'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -101,7 +124,8 @@ jobs:
 
   publish:
     name: Publish to Maven Central
-    needs: [build-native]
+    needs: [preflight, build-native]
+    if: needs.preflight.outputs.can-publish == 'true'
     timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
