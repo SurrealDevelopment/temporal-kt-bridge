@@ -18,9 +18,11 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_sdk_core::ResourceBasedSlotsOptions;
 use temporalio_sdk_core::Worker as CoreWorker;
 use temporalio_sdk_core::{
-    PollError, SlotSupplierOptions, TunerHolderOptions, WorkerVersioningStrategy,
+    PollError, ResourceBasedTunerConfig, ResourceSlotOptions, SlotSupplierOptions,
+    TunerHolderOptions, WorkerVersioningStrategy,
 };
 
 use crate::abi::{KT_ERR_FAILED, KtKind};
@@ -279,7 +281,8 @@ pub fn worker_config(
         .map_err(|e| KtError::InvalidArgument(format!("invalid worker config: {e}")))
 }
 
-/// Fixed-size slot limits, defaulting to Core's own values when unset.
+/// Slot limits: Core's resource-based supplier when the caller asked for one, otherwise fixed
+/// sizes defaulting to Core's own values.
 fn tuner(
     options: &crate::proto::WorkerOptions,
 ) -> KtResult<Arc<dyn temporalio_sdk_core::WorkerTuner + Send + Sync>> {
@@ -292,14 +295,78 @@ fn tuner(
         }
     }
 
-    let holder = TunerHolderOptions::builder()
-        .workflow_slot_options(fixed(options.max_concurrent_workflow_tasks, 100))
-        .activity_slot_options(fixed(options.max_concurrent_activities, 100))
-        .local_activity_slot_options(fixed(options.max_concurrent_local_activities, 100))
-        .build()
-        .map_err(|e| KtError::InvalidArgument(format!("invalid slot options: {e}")))?
-        .build_tuner_holder()
-        .map_err(KtError::from)?;
+    fn limits(l: Option<&crate::proto::ResourceSlotLimits>) -> Option<ResourceSlotOptions> {
+        l.map(|l| {
+            ResourceSlotOptions::new(
+                l.minimum_slots as usize,
+                if l.maximum_slots > 0 {
+                    l.maximum_slots as usize
+                } else {
+                    10_000
+                },
+                std::time::Duration::from_millis(l.ramp_throttle_millis),
+            )
+        })
+    }
+
+    /// Resource-based when this slot type carries limits, fixed otherwise, so a worker can mix
+    /// the two.
+    fn slot<K: temporalio_sdk_core::SlotKind>(
+        limits: Option<ResourceSlotOptions>,
+        fixed_slots: u32,
+        default: usize,
+    ) -> SlotSupplierOptions<K> {
+        match limits {
+            Some(l) => SlotSupplierOptions::ResourceBased(l),
+            None => fixed(fixed_slots, default),
+        }
+    }
+
+    let holder = if let Some(rb) = options.resource_tuner.as_ref() {
+        let opts = ResourceBasedSlotsOptions::builder()
+            .target_mem_usage(rb.target_memory_usage)
+            .target_cpu_usage(rb.target_cpu_usage)
+            .mem_p_gain(rb.memory_p_gain)
+            .mem_i_gain(rb.memory_i_gain)
+            .mem_d_gain(rb.memory_d_gain)
+            .mem_output_threshold(rb.memory_output_threshold)
+            .cpu_p_gain(rb.cpu_p_gain)
+            .cpu_i_gain(rb.cpu_i_gain)
+            .cpu_d_gain(rb.cpu_d_gain)
+            .cpu_output_threshold(rb.cpu_output_threshold)
+            .build();
+
+        TunerHolderOptions::builder()
+            .resource_based_config(ResourceBasedTunerConfig::Options(opts))
+            .workflow_slot_options(slot(
+                limits(options.workflow_resource_limits.as_ref()),
+                options.max_concurrent_workflow_tasks,
+                100,
+            ))
+            .activity_slot_options(slot(
+                limits(options.activity_resource_limits.as_ref()),
+                options.max_concurrent_activities,
+                100,
+            ))
+            .local_activity_slot_options(slot(
+                limits(options.local_activity_resource_limits.as_ref()),
+                options.max_concurrent_local_activities,
+                100,
+            ))
+            .build()
+            .map_err(|e| KtError::InvalidArgument(format!("invalid slot options: {e}")))?
+            .build_tuner_holder()
+            .map_err(KtError::from)?
+    } else {
+        TunerHolderOptions::builder()
+            .workflow_slot_options(fixed(options.max_concurrent_workflow_tasks, 100))
+            .activity_slot_options(fixed(options.max_concurrent_activities, 100))
+            .local_activity_slot_options(fixed(options.max_concurrent_local_activities, 100))
+            .build()
+            .map_err(|e| KtError::InvalidArgument(format!("invalid slot options: {e}")))?
+            .build_tuner_holder()
+            .map_err(KtError::from)?
+    };
     Ok(Arc::new(holder))
 }
 

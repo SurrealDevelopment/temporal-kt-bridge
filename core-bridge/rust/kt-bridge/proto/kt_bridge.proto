@@ -64,6 +64,47 @@ message WorkerOptions {
   bool no_remote_activities = 8;
   // Optional identifier; versioning itself is not wired through yet.
   string build_id = 9;
+
+  // Resource-based tuning. Core shares one controller (and therefore one set of targets and
+  // gains) across a worker's slot types, so the targets live here while each slot type carries
+  // its own limits. A slot type with no limits stays fixed-size, so the three can be mixed.
+  ResourceBasedTuner resource_tuner = 10;
+  ResourceSlotLimits workflow_resource_limits = 11;
+  ResourceSlotLimits activity_resource_limits = 12;
+  ResourceSlotLimits local_activity_resource_limits = 13;
+}
+
+// Core's resource-based slot supplier, which hands out slots while memory and CPU are under
+// target and holds them back when they are not.
+//
+// The previous bridge implemented this in the JVM: a PID controller and a resource monitor behind
+// seven FFM upcalls on the path in front of every poll. Core's version is the same algorithm with
+// the same default gains, so the only thing the JVM copy bought was the upcalls.
+message ResourceBasedTuner {
+  // Both in [0.0, 1.0].
+  double target_memory_usage = 1;
+  double target_cpu_usage = 2;
+
+  // PID gains, always populated by the caller: the JVM's own defaults are Core's defaults, so
+  // these are passed through as-is rather than treating 0.0 as "unset" -- 0.0 is a legitimate
+  // gain, and i_gain's default is exactly that.
+  double memory_p_gain = 3;
+  double memory_i_gain = 4;
+  double memory_d_gain = 5;
+  double memory_output_threshold = 6;
+  double cpu_p_gain = 7;
+  double cpu_i_gain = 8;
+  double cpu_d_gain = 9;
+  double cpu_output_threshold = 10;
+}
+
+// Per-slot-type bounds for a resource-based supplier.
+message ResourceSlotLimits {
+  // Slots handed out regardless of resource pressure, and a hard ceiling.
+  uint32 minimum_slots = 1;
+  uint32 maximum_slots = 2;
+  // Minimum wait between issuing slots once past minimum_slots, to stop burst allocation.
+  uint64 ramp_throttle_millis = 3;
 }
 
 // How long shutdown waits for in-flight tasks before finalizing anyway.

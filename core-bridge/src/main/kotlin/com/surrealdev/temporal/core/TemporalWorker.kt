@@ -174,6 +174,103 @@ class TemporalWorker private constructor(
 
 private fun SlotSupplier.fixedSlotsOrZero(): Int = (this as? SlotSupplier.FixedSize)?.slots ?: 0
 
+private class ProtoBuf {
+    private val out = java.io.ByteArrayOutputStream()
+
+    private fun varint(value: Long) {
+        var v = value
+        while (v and 0x7FL.inv() != 0L) {
+            out.write(((v and 0x7F) or 0x80).toInt())
+            v = v ushr 7
+        }
+        out.write(v.toInt())
+    }
+
+    fun double(
+        number: Int,
+        value: Double,
+    ) = apply {
+        out.write((number shl 3) or 1)
+        var bits = java.lang.Double.doubleToLongBits(value)
+        repeat(8) {
+            out.write((bits and 0xFF).toInt())
+            bits = bits ushr 8
+        }
+    }
+
+    fun uint(
+        number: Int,
+        value: Long,
+    ) = apply {
+        if (value > 0) {
+            out.write((number shl 3) or 0)
+            varint(value)
+        }
+    }
+
+    fun bytes(): ByteArray = out.toByteArray()
+}
+
+/**
+ * The shared PID targets and gains, or null when this supplier is not resource-based.
+ *
+ * Fixed-width doubles rather than varints: a gain of 0.0 is meaningful (it is `i_gain`'s default),
+ * so these fields cannot be skipped the way a zero-valued varint is.
+ */
+@Suppress("DEPRECATION")
+private fun SlotSupplier.resourceTargets(): ByteArray? =
+    when (this) {
+        is SlotSupplier.FixedSize -> null
+        is SlotSupplier.JvmResourceBased ->
+            ProtoBuf()
+                .double(1, targetMemoryUsage)
+                .double(2, targetCpuUsage)
+                .double(3, pidTuning.memoryPGain)
+                .double(4, pidTuning.memoryIGain)
+                .double(5, pidTuning.memoryDGain)
+                .double(6, pidTuning.memoryOutputThreshold)
+                .double(7, pidTuning.cpuPGain)
+                .double(8, pidTuning.cpuIGain)
+                .double(9, pidTuning.cpuDGain)
+                .double(10, pidTuning.cpuOutputThreshold)
+                .bytes()
+        // CGroupResourceBased carried no PID knobs, so Core's defaults apply. The JVM-heap vs
+        // system-memory distinction the two variants drew disappears here: Core samples the
+        // system (cgroup-aware) either way, which is why JvmResourceBased is the survivor.
+        is SlotSupplier.CGroupResourceBased ->
+            ProtoBuf()
+                .double(1, targetMemoryUsage)
+                .double(2, targetCpuUsage)
+                .double(3, 5.0)
+                .double(4, 0.0)
+                .double(5, 1.0)
+                .double(6, 0.25)
+                .double(7, 5.0)
+                .double(8, 0.0)
+                .double(9, 1.0)
+                .double(10, 0.05)
+                .bytes()
+    }
+
+/** This slot type's own bounds, or null when it is fixed-size. */
+@Suppress("DEPRECATION")
+private fun SlotSupplier.resourceLimits(): ByteArray? =
+    when (this) {
+        is SlotSupplier.FixedSize -> null
+        is SlotSupplier.JvmResourceBased ->
+            ProtoBuf()
+                .uint(1, minimumSlots.toLong())
+                .uint(2, maximumSlots.toLong())
+                .uint(3, rampThrottleMs)
+                .bytes()
+        is SlotSupplier.CGroupResourceBased ->
+            ProtoBuf()
+                .uint(1, minimumSlots.toLong())
+                .uint(2, maximumSlots.toLong())
+                .uint(3, rampThrottleMs)
+                .bytes()
+    }
+
 /** Encodes `kt_bridge.WorkerOptions` by hand: the bridge's own config protos are not published. */
 internal object WorkerOptionsProto {
     fun encode(
@@ -211,15 +308,40 @@ internal object WorkerOptionsProto {
             out.write((number shl 3) or 0)
             varint(value)
         }
+
+        fun message(
+            number: Int,
+            body: ByteArray,
+        ) {
+            out.write((number shl 3) or 2)
+            varint(body.size)
+            out.write(body)
+        }
         string(1, namespace)
         string(2, taskQueue)
         int(4, config.maxCachedWorkflows)
-        // Slot limits map onto Core's own FixedSize supplier. A ResourceBased or Custom supplier
-        // falls through to Core's defaults for now; the custom-supplier path deliberately does not
-        // come back as JVM callbacks, which is what the 7 upcalls in front of every poll were.
+
+        // Fixed slot counts. A resource-based supplier leaves these at 0 and sends limits below.
         int(5, config.workflowSlotSupplier.fixedSlotsOrZero())
         int(6, config.activitySlotSupplier.fixedSlotsOrZero())
         int(7, config.localActivitySlotSupplier.fixedSlotsOrZero())
+
+        // Resource-based tuning is Core's own supplier now. The previous bridge ran the identical
+        // algorithm in the JVM -- same PID gains, same defaults -- behind seven FFM upcalls sitting
+        // in front of every poll, so moving it into Rust costs nothing but the upcalls.
+        //
+        // Core shares one controller across a worker's slot types, so the targets and gains are
+        // taken from whichever supplier is resource-based (they are the same object in every
+        // realistic configuration) while each slot type sends its own limits. A slot type left
+        // fixed sends none and stays fixed.
+        val suppliers =
+            listOf(
+                11 to config.workflowSlotSupplier,
+                12 to config.activitySlotSupplier,
+                13 to config.localActivitySlotSupplier,
+            )
+        suppliers.firstNotNullOfOrNull { (_, s) -> s.resourceTargets() }?.let { message(10, it) }
+        suppliers.forEach { (field, supplier) -> supplier.resourceLimits()?.let { message(field, it) } }
         return out.toByteArray()
     }
 }
