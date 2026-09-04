@@ -1,0 +1,18 @@
+# Provenance of the vendored .proto files in src/main/proto.
+#
+# They are copied verbatim from the `temporalio-protos` crate published on crates.io. The crate
+# tarball is immutable, so a version pin here fully determines the content -- `verifyProtoPin`
+# re-checks that the working tree still matches `protos.sha256`, and `syncProtosFromCrate`
+# rewrites both from the pinned version.
+#
+# Vendoring rather than reading the sdk-core submodule keeps this module buildable with neither
+# cargo nor a submodule checkout, keeps the Gradle build cache relocatable (no absolute
+# ~/.cargo/registry paths in task inputs), and makes a proto bump a reviewable diff.
+crate = "temporalio-protos"
+version = "0.6.0"
+
+# Only these directories are vendored, and only their *.proto files. The crate also ships
+# Makefiles, buf configs, openapi specs and .wit files that protoc never reads. google/protobuf
+# well-known types are deliberately excluded: the protobuf-java runtime supplies them, and
+# generating our own would conflict with it.
+directories = ["local", "api_upstream", "testsrv_upstream"]
