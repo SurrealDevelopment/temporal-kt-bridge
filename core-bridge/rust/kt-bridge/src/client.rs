@@ -31,7 +31,9 @@ pub fn connection_options(config: &crate::proto::ClientOptions) -> KtResult<Conn
     // ConnectionOptions in SDK-Core 0.8, having moved to the higher-level client. They are still
     // in the proto so the JVM surface does not have to change when they are wired back up.
     Ok(ConnectionOptions::new(target)
-        .maybe_identity(non_empty(&config.identity))
+        // Defaulted rather than required: Core rejects an empty identity when a worker is built,
+        // and failing there is a confusing place to learn that a client option was missing.
+        .identity(default_identity(&config.identity))
         .maybe_api_key(non_empty(&config.api_key))
         .maybe_connect_timeout(
             (config.connect_timeout_millis > 0)
@@ -42,6 +44,18 @@ pub fn connection_options(config: &crate::proto::ClientOptions) -> KtResult<Conn
 
 fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
+}
+
+/// `<pid>@<hostname>`, the convention the other SDKs use.
+fn default_identity(configured: &str) -> String {
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_string());
+    format!("{}@{}", std::process::id(), host)
 }
 
 pub async fn connect(

@@ -97,7 +97,7 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
         let _entered = rt.core.tokio_handle().enter();
         temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone()).expect("init_worker")
     };
-    let entry = std::sync::Arc::new(worker::WorkerEntry::new(std::sync::Arc::new(core), rt.sender()));
+    let entry = std::sync::Arc::new(worker::WorkerEntry::new(std::sync::Arc::new(core), rt.sender(), rt.core.tokio_handle().clone()));
     let worker_handle = HANDLES.insert(Entry::Worker(entry.clone()));
 
     worker::start(&entry, &rt, worker_handle).expect("start");

@@ -259,14 +259,21 @@ kt_export! {
         let options: proto::WorkerOptions = prost::Message::decode(unsafe { slice(cfg, cfg_len) }?)?;
         let config = worker::worker_config(&options)?;
 
-        // init_worker needs a Tokio context.
-        let _entered = rt.core.tokio_handle().enter();
-        let core = temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone())
+        // init_worker constructs long-poll buffers that spawn onto the reactor, so it needs a
+        // full runtime context. `Handle::enter()` only sets the thread-local handle and proved
+        // insufficient here -- it panicked with "there is no reactor running" from the JVM's
+        // calling thread, intermittently enough that slower logging hid it. `block_on` enters the
+        // runtime properly. init_worker is synchronous and fast, so blocking the caller is fine.
+        let core = rt
+            .core
+            .tokio_handle()
+            .block_on(async { temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone()) })
             .map_err(KtError::from)?;
 
         let entry = std::sync::Arc::new(worker::WorkerEntry::new(
             std::sync::Arc::new(core),
             rt.sender(),
+            rt.core.tokio_handle().clone(),
         ));
         let handle = HANDLES.insert(Entry::Worker(entry));
         unsafe { out_worker.write(handle) };
@@ -320,7 +327,7 @@ kt_export! {
     fn kt_worker_heartbeat(worker: u64, proto_bytes: *const u8, proto_len: u32) {
         let entry = HANDLES.worker(worker)?;
         let core = entry.core()?;
-        worker::heartbeat(&core, unsafe { slice(proto_bytes, proto_len) }?)
+        worker::heartbeat(&entry, &core, unsafe { slice(proto_bytes, proto_len) }?)
     }
 }
 

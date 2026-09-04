@@ -42,6 +42,13 @@ pub enum WorkerState {
 pub struct WorkerEntry {
     pub state: Mutex<WorkerState>,
     pub sender: Sender,
+    /// The runtime this worker belongs to.
+    ///
+    /// Held because synchronous Core calls made from a JVM thread still spawn internally --
+    /// `record_activity_heartbeat` does -- and panic with "there is no reactor running" without a
+    /// runtime context. Keeping the handle here means every entry point can enter it without the
+    /// caller having to pass the runtime in.
+    pub tokio: tokio::runtime::Handle,
     /// How many poll loops are still running.
     ///
     /// Shutdown must not finalize until every pump has seen `PollError::ShutDown`, because Core's
@@ -50,10 +57,11 @@ pub struct WorkerEntry {
 }
 
 impl WorkerEntry {
-    pub fn new(core: Arc<CoreWorker>, sender: Sender) -> Self {
+    pub fn new(core: Arc<CoreWorker>, sender: Sender, tokio: tokio::runtime::Handle) -> Self {
         Self {
             state: Mutex::new(WorkerState::Running { core, started: false }),
             sender,
+            tokio,
             live_pumps: Arc::new(AtomicUsize::new(3)),
         }
     }
@@ -352,9 +360,16 @@ pub async fn complete(core: &Arc<CoreWorker>, task_kind: u32, bytes: &[u8]) -> R
 }
 
 /// Records an activity heartbeat.
-pub fn heartbeat(core: &Arc<CoreWorker>, bytes: &[u8]) -> KtResult {
+///
+/// Runs inside the runtime: this is called synchronously from a JVM thread, and Core spawns
+/// internally, which panics with "there is no reactor running" without a context. That panic was
+/// contained by `kt_export!` -- so the call merely returned an error -- but it poisoned a
+/// `LazyLock` inside Core, and every later worker operation in the process then failed with
+/// "LazyLock instance has previously been poisoned". A contained panic is not a harmless one when
+/// it leaves shared state broken.
+pub fn heartbeat(entry: &WorkerEntry, core: &Arc<CoreWorker>, bytes: &[u8]) -> KtResult {
     let heartbeat: temporalio_common::protos::coresdk::ActivityHeartbeat =
         prost::Message::decode(bytes)?;
-    core.record_activity_heartbeat(heartbeat);
+    entry.tokio.block_on(async { core.record_activity_heartbeat(heartbeat) });
     Ok(())
 }
