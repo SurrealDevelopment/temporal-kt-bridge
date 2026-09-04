@@ -131,7 +131,7 @@ pub async fn start(
 }
 
 fn port(options: &crate::proto::EphemeralServerOptions) -> Option<u16> {
-    (options.port > 0 && options.port <= u16::MAX as u32).then(|| options.port as u16)
+    (options.port > 0 && options.port <= u16::MAX as u32).then_some(options.port as u16)
 }
 
 /// Where the child's output goes.

@@ -18,7 +18,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use temporalio_sdk_core::Worker as CoreWorker;
 use temporalio_common::worker::WorkerTaskTypes;
-use temporalio_sdk_core::{PollError, WorkerVersioningStrategy};
+use temporalio_sdk_core::{
+    PollError, SlotSupplierOptions, TunerHolderOptions, WorkerVersioningStrategy,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::{KT_ERR_FAILED, KtKind};
@@ -228,7 +230,14 @@ pub fn worker_config(
         enable_nexus: false,
     };
 
+    // Slot limits use Core's own FixedSize supplier. The C bridge instead implemented a custom
+    // SlotSupplier in the JVM, which cost 7 FFM upcalls on the path in front of every poll plus a
+    // PID controller and a resource monitor -- roughly 500 lines to approximate what Core already
+    // does. Core also offers a ResourceBased supplier if these ever need to be adaptive.
+    let tuner = tuner(options)?;
+
     temporalio_sdk_core::WorkerConfig::builder()
+        .tuner(tuner)
         .namespace(options.namespace.clone())
         .task_queue(options.task_queue.clone())
         .max_cached_workflows(options.max_cached_workflows as usize)
@@ -244,6 +253,30 @@ pub fn worker_config(
         )
         .build()
         .map_err(|e| KtError::InvalidArgument(format!("invalid worker config: {e}")))
+}
+
+/// Fixed-size slot limits, defaulting to Core's own values when unset.
+fn tuner(
+    options: &crate::proto::WorkerOptions,
+) -> KtResult<Arc<dyn temporalio_sdk_core::WorkerTuner + Send + Sync>> {
+    fn fixed<K: temporalio_sdk_core::SlotKind>(
+        slots: u32,
+        default: usize,
+    ) -> SlotSupplierOptions<K> {
+        SlotSupplierOptions::FixedSize {
+            slots: if slots > 0 { slots as usize } else { default },
+        }
+    }
+
+    let holder = TunerHolderOptions::builder()
+        .workflow_slot_options(fixed(options.max_concurrent_workflow_tasks, 100))
+        .activity_slot_options(fixed(options.max_concurrent_activities, 100))
+        .local_activity_slot_options(fixed(options.max_concurrent_local_activities, 100))
+        .build()
+        .map_err(|e| KtError::InvalidArgument(format!("invalid slot options: {e}")))?
+        .build_tuner_holder()
+        .map_err(KtError::from)?;
+    Ok(Arc::new(holder))
 }
 
 /// Shuts the worker down without ever leaving Core's poll contract unsatisfied.
