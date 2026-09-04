@@ -33,6 +33,7 @@ use abi::*;
 use error::{KtError, KtResult};
 use handle::{Entry, HANDLES};
 
+
 /// Copies `src` into a caller-provided buffer, reporting the length it needed.
 ///
 /// `out_len` always receives the full length, so a caller that guessed too small can retry with
@@ -127,8 +128,7 @@ kt_export! {
     /// Terminal. Answers every outstanding request with `KT_ERR_SHUTDOWN` and wakes all pollers,
     /// so no JVM continuation is left waiting for a completion that will never arrive.
     fn kt_runtime_free(runtime: u64) {
-        let entry = HANDLES.remove(runtime)?;
-        match entry {
+        match HANDLES.remove_of_kind(runtime, handle::KIND_RUNTIME)? {
             Entry::Runtime(entry) => {
                 runtime::free_runtime(entry);
                 Ok(())
@@ -148,7 +148,7 @@ kt_export! {
             return Err(KtError::InvalidArgument("out_poller is null".into()));
         }
         let entry = HANDLES.runtime(runtime)?;
-        let poller = entry.queue.poller(runtime);
+        let poller = entry.queue.poller();
         let handle = HANDLES.insert(Entry::Poller(std::sync::Arc::new(poller)));
         unsafe { out_poller.write(handle) };
         Ok(())
@@ -176,7 +176,7 @@ kt_export! {
             return Err(KtError::InvalidArgument("out/out_count is null".into()));
         }
         let entry = HANDLES.poller(poller)?;
-        let count = unsafe { entry.poll(out, cap, timeout_millis) };
+        let count = unsafe { entry.poll(out, cap, timeout_millis) }?;
         unsafe { out_count.write(count) };
         Ok(())
     }
@@ -192,7 +192,7 @@ kt_export! {
 
 kt_export! {
     fn kt_poller_free(poller: u64) {
-        HANDLES.remove(poller)?;
+        HANDLES.remove_of_kind(poller, handle::KIND_POLLER)?;
         Ok(())
     }
 }

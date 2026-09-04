@@ -91,7 +91,7 @@ internal object KtBridge {
     private fun checkAbi() {
         Arena.ofConfined().use { arena ->
             val cap = 32
-            val buf = arena.allocate(JAVA_INT.byteSize() * cap)
+            val buf = arena.allocate(JAVA_INT, cap.toLong())
             val n = abiProbe.invokeExact(buf, cap) as Int
             require(n in 1..cap) { "kt_abi_probe reported $n values" }
             val actual = IntArray(n) { buf.get(JAVA_INT, it * 4L) }
@@ -126,7 +126,10 @@ internal object KtBridge {
             ) {
                 ""
             } else {
-                String(buf.asSlice(0, minOf(n, cap).toLong()).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE))
+                String(
+                    buf.asSlice(0, minOf(n, cap).toLong()).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE),
+                    Charsets.UTF_8,
+                )
             }
         }
 

@@ -2,7 +2,6 @@ package com.surrealdev.temporal.core.kt
 
 import java.lang.foreign.Arena
 import java.lang.foreign.ValueLayout.JAVA_INT
-import java.lang.foreign.ValueLayout.JAVA_LONG
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -17,10 +16,10 @@ import kotlin.test.assertTrue
 class KtBridgeAbiTest {
     @Test
     fun `the native library's ABI matches the constants this code reads it with`() {
-        // Must touch a real member, not a const val: constants are inlined at compile time, so
-        // reading one would not load the class and the ABI check would never run.
+        // Touch a real member: `const val`s are inlined at compile time, so reading one would
+        // neither load the class nor run the ABI check. Reaching here at all means kt_abi_probe
+        // agreed with every offset constant.
         KtBridge.lastError()
-        assertEquals(48L, KtBridge.RECORD_BYTES)
     }
 
     @Test
@@ -59,7 +58,7 @@ class KtBridgeAbiTest {
         val poller = KtBridge.pollerNew(runtime)
         try {
             Arena.ofConfined().use { arena ->
-                val batch = arena.allocate(KtBridge.RECORD_BYTES * 8)
+                val batch = arena.allocate(KtBridge.RECORD_BYTES * 8, 8)
                 val count = arena.allocate(JAVA_INT)
                 assertEquals(KtBridge.KT_OK, KtBridge.poll(poller, batch, 8, 0, count))
                 assertEquals(0, count.get(JAVA_INT, 0))
@@ -80,7 +79,7 @@ class KtBridgeAbiTest {
         val blocked =
             Thread.ofPlatform().start {
                 Arena.ofConfined().use { arena ->
-                    val batch = arena.allocate(KtBridge.RECORD_BYTES * 4)
+                    val batch = arena.allocate(KtBridge.RECORD_BYTES * 4, 8)
                     val count = arena.allocate(JAVA_INT)
                     // -1 blocks indefinitely; only a wake can release it.
                     KtBridge.poll(poller, batch, 4, -1, count)
@@ -108,17 +107,40 @@ class KtBridgeAbiTest {
     }
 
     @Test
-    fun `the completion record layout is readable at the documented offsets`() {
-        Arena.ofConfined().use { arena ->
-            val batch = arena.allocate(KtBridge.RECORD_BYTES)
-            batch.set(JAVA_LONG, KtBridge.O_REQ_ID, 42L)
-            batch.set(JAVA_INT, KtBridge.O_KIND, 3)
-            batch.set(JAVA_INT, KtBridge.O_STATUS, -5)
-            batch.set(JAVA_LONG, KtBridge.O_AUX0, 7L)
-            assertEquals(42L, batch.get(JAVA_LONG, KtBridge.O_REQ_ID))
-            assertEquals(3, batch.get(JAVA_INT, KtBridge.O_KIND))
-            assertEquals(-5, batch.get(JAVA_INT, KtBridge.O_STATUS))
-            assertEquals(7L, batch.get(JAVA_LONG, KtBridge.O_AUX0))
+    fun `freeing a poller handle as a runtime is rejected and leaves both alive`() {
+        // Regression: `remove` checked only index and generation, so kt_poller_free(runtimeHandle)
+        // destroyed the runtime, returned KT_OK and skipped shutdown -- leaving every pump parked
+        // forever on a runtime that no longer existed.
+        val runtime = KtBridge.runtimeNew(ByteArray(0))
+        val poller = KtBridge.pollerNew(runtime)
+        try {
+            assertEquals(KtBridge.KT_ERR_WRONG_HANDLE_KIND, KtBridge.pollerFree(runtime))
+            // The runtime must still be usable, i.e. the rejected free removed nothing.
+            assertEquals(KtBridge.KT_OK, KtBridge.pollerWake(poller))
+        } finally {
+            KtBridge.pollerFree(poller)
+            KtBridge.runtimeFree(runtime)
         }
+    }
+
+    @Test
+    fun `polling after the runtime is freed returns immediately instead of parking`() {
+        // Regression: the close signal was one-shot, so the first post-shutdown poll consumed it
+        // and every later one blocked forever with no producer left alive. A real pump loops.
+        val runtime = KtBridge.runtimeNew(ByteArray(0))
+        val poller = KtBridge.pollerNew(runtime)
+        KtBridge.runtimeFree(runtime)
+
+        val done =
+            Thread.ofPlatform().start {
+                Arena.ofConfined().use { arena ->
+                    val batch = arena.allocate(KtBridge.RECORD_BYTES * 4, 8)
+                    val count = arena.allocate(JAVA_INT)
+                    repeat(3) { KtBridge.poll(poller, batch, 4, -1, count) }
+                }
+            }
+        done.join(5_000)
+        assertTrue(!done.isAlive, "a pump looping after shutdown must not park")
+        KtBridge.pollerFree(poller)
     }
 }

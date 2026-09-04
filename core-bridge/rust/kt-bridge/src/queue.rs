@@ -16,12 +16,14 @@
 //!   2. **Payload memory belongs to the poller and lives until its next poll.** One implicit
 //!      release per batch, instead of a free call per result.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::{Condvar, Mutex};
 
 use crate::abi::{KtCompletion, KtKind};
+use crate::error::{KtError, KtResult};
 
 /// A completion plus the bytes it refers to, before those bytes are copied into a batch buffer.
 pub struct Pending {
@@ -97,45 +99,66 @@ impl BatchBuf {
     }
 }
 
+/// Queue state, all of it behind one mutex.
+///
+/// `wake_seq` and `closed` live *inside* the mutex deliberately. An earlier version kept `woken`
+/// as an `AtomicBool` set outside it, which lost wakeups: a poller could observe the queue empty
+/// and the flag clear while still holding the guard, a waker could then set the flag and
+/// `notify_all` with nobody parked (a `Condvar` signal is not sticky), and the poller would go on
+/// to `wait` forever. That is the exact hang this design exists to remove, so the state a waiter
+/// tests and the signal that wakes it must be published under the same lock.
+struct State {
+    queue: VecDeque<Pending>,
+    /// Wakes delivered but not yet consumed.
+    ///
+    /// A counter rather than an epoch a waiter samples on entry: with an epoch, a wake published
+    /// *before* the poll starts is indistinguishable from no wake at all, and the poller parks on
+    /// a signal that has already been and gone. Consuming a pending wake makes it sticky until
+    /// somebody actually acts on it.
+    wakes: u64,
+    /// Sticky. Once the runtime is gone, every later poll must return immediately rather than
+    /// park: nothing will ever push again, and the poller outlives the runtime.
+    closed: bool,
+}
+
 struct Shared {
-    queue: Mutex<Vec<Pending>>,
+    state: Mutex<State>,
     signal: Condvar,
-    woken: AtomicBool,
 }
 
 /// One poller, owned by exactly one JVM pump thread.
 pub struct PollerEntry {
     shared: Arc<Shared>,
-    /// Batch scratch. A `Mutex` only to satisfy `Sync`; contention would mean two threads share a
-    /// poller, which the Kotlin side does not do.
+    /// Batch scratch, reused across polls.
     buf: Mutex<BatchBuf>,
-    pub runtime: u64,
+    /// Enforces single-threaded use rather than merely documenting it.
+    ///
+    /// Payload pointers handed out by one poll stay valid until *this poller's* next poll. Two
+    /// threads polling the same poller would let one reset and reallocate the slab under the
+    /// other's still-valid pointers -- silent cross-FFI corruption. A comment cannot prevent
+    /// that; a handle is just a u64 any thread can pass.
+    in_poll: AtomicBool,
 }
 
 /// The queue a runtime pushes into. Cloned into every Rust task that reports back.
 #[derive(Clone)]
 pub struct Sender {
     shared: Arc<Shared>,
-    next_req_id: Arc<AtomicU64>,
 }
 
 impl Sender {
     pub fn push(&self, pending: Pending) {
-        let mut queue = self.shared.queue.lock();
-        queue.push(pending);
-        self.shared.signal.notify_one();
-    }
-
-    /// Ids for work the bridge starts on its own, kept disjoint from caller-supplied ids by
-    /// starting above the range the JVM allocates from.
-    pub fn internal_req_id(&self) -> u64 {
-        self.next_req_id.fetch_add(1, Ordering::Relaxed)
+        let mut state = self.shared.state.lock();
+        if state.closed {
+            return;
+        }
+        state.queue.push_back(pending);
+        self.shared.signal.notify_all();
     }
 }
 
 pub struct Queue {
     shared: Arc<Shared>,
-    next_req_id: Arc<AtomicU64>,
 }
 
 impl Default for Queue {
@@ -148,74 +171,108 @@ impl Queue {
     pub fn new() -> Self {
         Self {
             shared: Arc::new(Shared {
-                queue: Mutex::new(Vec::new()),
+                state: Mutex::new(State {
+                    queue: VecDeque::new(),
+                    wakes: 0,
+                    closed: false,
+                }),
                 signal: Condvar::new(),
-                woken: AtomicBool::new(false),
             }),
-            // Well above anything the JVM allocates, so internal and caller ids cannot collide.
-            next_req_id: Arc::new(AtomicU64::new(1 << 48)),
         }
     }
 
     pub fn sender(&self) -> Sender {
-        Sender {
-            shared: self.shared.clone(),
-            next_req_id: self.next_req_id.clone(),
-        }
+        Sender { shared: self.shared.clone() }
     }
 
-    pub fn poller(&self, runtime: u64) -> PollerEntry {
+    pub fn poller(&self) -> PollerEntry {
         PollerEntry {
             shared: self.shared.clone(),
             buf: Mutex::new(BatchBuf::default()),
-            runtime,
+            in_poll: AtomicBool::new(false),
         }
     }
 
-    /// Unblocks every waiting poller, used on shutdown.
-    pub fn wake_all(&self) {
-        self.shared.woken.store(true, Ordering::SeqCst);
+    /// Closes the queue permanently and releases every waiter.
+    ///
+    /// Sticky, so a pump that re-enters `poll` after shutdown returns immediately instead of
+    /// parking forever with no producer left alive.
+    pub fn close(&self) {
+        let mut state = self.shared.state.lock();
+        state.closed = true;
         self.shared.signal.notify_all();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.shared.state.lock().closed
     }
 }
 
 impl PollerEntry {
-    /// Blocks until at least one completion is available, the timeout elapses, or the poller is
-    /// woken; then fills `out` with up to `cap` records.
+    /// Blocks until at least one completion is available, the timeout elapses, the poller is
+    /// woken, or the queue is closed; then fills `out` with up to `cap` records.
     ///
-    /// Returns the number written. Waiting happens in a real `Condvar` park -- no spinning and no
-    /// polling interval -- and batching is opportunistic: it never waits to fill a batch, so a
-    /// lone completion is not delayed.
+    /// Returns the number written. A return of 0 is legitimate for any of those reasons and the
+    /// caller is expected to loop.
     ///
     /// # Safety
-    /// `out` must point to `cap` writable `KtCompletion` slots.
-    pub unsafe fn poll(&self, out: *mut KtCompletion, cap: u32, timeout_millis: i32) -> u32 {
+    /// `out` must point to at least `cap` writable, 8-byte-aligned [`KtCompletion`] slots, and
+    /// must remain valid for the duration of the call. Payload pointers in the returned records
+    /// borrow this poller's slab and stay valid only until this poller's next `poll`.
+    pub unsafe fn poll(&self, out: *mut KtCompletion, cap: u32, timeout_millis: i32) -> KtResult<u32> {
         if cap == 0 {
-            return 0;
+            return Ok(0);
         }
+        if out.is_null() {
+            return Err(KtError::InvalidArgument("out is null".into()));
+        }
+        // See `in_poll`: reject rather than corrupt.
+        if self.in_poll.swap(true, Ordering::Acquire) {
+            return Err(KtError::InvalidArgument(
+                "this poller is already being polled by another thread; each poller belongs to one pump thread".into(),
+            ));
+        }
+        let _guard = InPoll(&self.in_poll);
 
         let drained: Vec<Pending> = {
-            let mut queue = self.shared.queue.lock();
-            if queue.is_empty() && !self.shared.woken.swap(false, Ordering::SeqCst) {
-                if timeout_millis < 0 {
-                    self.shared.signal.wait(&mut queue);
-                } else {
-                    let timeout = std::time::Duration::from_millis(timeout_millis as u64);
-                    self.shared.signal.wait_for(&mut queue, timeout);
+            let mut state = self.shared.state.lock();
+            let deadline = (timeout_millis > 0).then(|| {
+                std::time::Instant::now() + std::time::Duration::from_millis(timeout_millis as u64)
+            });
+
+            // `loop`, not `if`: a Condvar may wake spuriously, so the predicate -- not the
+            // signal -- decides when there is something to do.
+            loop {
+                if !state.queue.is_empty() || state.closed {
+                    break;
+                }
+                if state.wakes > 0 {
+                    state.wakes -= 1;
+                    break;
+                }
+                if timeout_millis == 0 {
+                    break;
+                }
+                match deadline {
+                    None => self.shared.signal.wait(&mut state),
+                    Some(deadline) => {
+                        if self.shared.signal.wait_until(&mut state, deadline).timed_out() {
+                            break;
+                        }
+                    }
                 }
             }
-            let take = (cap as usize).min(queue.len());
-            queue.drain(..take).collect()
+
+            let take = (cap as usize).min(state.queue.len());
+            state.queue.drain(..take).collect()
         };
 
         if drained.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         let mut buf = self.buf.lock();
         buf.reset();
-        // Reserve the whole batch before writing any of it: a reallocation partway through would
-        // dangle the pointers already stored in earlier records of this batch.
         let total: usize = drained.iter().map(|p| p.payload.len()).sum();
         if buf.bytes.len() < total {
             buf.bytes.resize(total.next_power_of_two().max(64 * 1024), 0);
@@ -238,12 +295,23 @@ impl PollerEntry {
             };
             unsafe { out.add(index).write(record) };
         }
-        drained.len() as u32
+        Ok(drained.len() as u32)
     }
 
+    /// Releases a parked poll. Idempotent and safe from any thread.
     pub fn wake(&self) {
-        self.shared.woken.store(true, Ordering::SeqCst);
+        let mut state = self.shared.state.lock();
+        state.wakes += 1;
         self.shared.signal.notify_all();
+    }
+}
+
+/// Clears the in-poll flag even if the body returns early or unwinds.
+struct InPoll<'a>(&'a AtomicBool);
+
+impl Drop for InPoll<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -256,7 +324,7 @@ mod tests {
             KtCompletion { req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0 };
             cap as usize
         ];
-        let n = unsafe { poller.poll(out.as_mut_ptr(), cap, 0) };
+        let n = unsafe { poller.poll(out.as_mut_ptr(), cap, 0) }.unwrap();
         out.truncate(n as usize);
         out
     }
@@ -264,7 +332,7 @@ mod tests {
     #[test]
     fn a_pushed_completion_round_trips_with_its_payload() {
         let queue = Queue::new();
-        let poller = queue.poller(0);
+        let poller = queue.poller();
         queue.sender().push(Pending::ack(7).payload(b"hello".to_vec()));
 
         let got = drain(&poller, 8);
@@ -281,7 +349,7 @@ mod tests {
         // Payloads share one slab, so a reallocation partway through would dangle the pointers
         // already written into earlier records of the same batch.
         let queue = Queue::new();
-        let poller = queue.poller(0);
+        let poller = queue.poller();
         let sender = queue.sender();
         for i in 0..64u64 {
             sender.push(Pending::ack(i).payload(vec![i as u8; 1024]));
@@ -301,7 +369,7 @@ mod tests {
     #[test]
     fn cap_bounds_the_batch_and_the_rest_stays_queued() {
         let queue = Queue::new();
-        let poller = queue.poller(0);
+        let poller = queue.poller();
         let sender = queue.sender();
         for i in 0..10u64 {
             sender.push(Pending::ack(i));
@@ -314,8 +382,68 @@ mod tests {
     #[test]
     fn an_empty_queue_returns_nothing_without_blocking() {
         let queue = Queue::new();
-        let poller = queue.poller(0);
+        let poller = queue.poller();
         assert_eq!(drain(&poller, 4).len(), 0);
+    }
+
+    /// A wake published *while the waiter is between checking and parking* must still be seen.
+    ///
+    /// This is the interleaving that deadlocked the previous implementation, which set an
+    /// AtomicBool and notified without holding the queue mutex: the notify hit zero parked
+    /// waiters and was dropped, and the waiter then parked forever. Hammering it exercises the
+    /// window rather than relying on a sleep to miss it.
+    #[test]
+    fn a_wake_racing_the_park_is_not_lost() {
+        for _ in 0..500 {
+            let queue = Queue::new();
+            let poller = Arc::new(queue.poller());
+            let waker = poller.clone();
+            let handle = std::thread::spawn(move || {
+                let mut out = [KtCompletion {
+                    req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                }; 1];
+                unsafe { waker.poll(out.as_mut_ptr(), 1, -1) }.unwrap()
+            });
+            // No sleep: land the wake anywhere in the check-then-park window.
+            poller.wake();
+            assert_eq!(handle.join().unwrap(), 0);
+        }
+    }
+
+    /// Closing must be sticky: a pump loops, so releasing it once is not enough.
+    #[test]
+    fn a_poll_after_close_returns_immediately_rather_than_parking() {
+        let queue = Queue::new();
+        let poller = queue.poller();
+        queue.close();
+        for _ in 0..3 {
+            // -1 would park forever if `closed` were one-shot like the old `woken` flag.
+            let mut out = [KtCompletion {
+                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+            }; 1];
+            assert_eq!(unsafe { poller.poll(out.as_mut_ptr(), 1, -1) }.unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn a_second_thread_polling_one_poller_is_rejected_not_allowed_to_corrupt() {
+        let queue = Queue::new();
+        let poller = Arc::new(queue.poller());
+        let blocker = poller.clone();
+        let held = std::thread::spawn(move || {
+            let mut out = [KtCompletion {
+                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+            }; 1];
+            unsafe { blocker.poll(out.as_mut_ptr(), 1, 400) }.unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let mut out = [KtCompletion {
+            req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+        }; 1];
+        // Would otherwise reset and possibly reallocate the slab under the first thread's
+        // still-valid payload pointers.
+        assert!(unsafe { poller.poll(out.as_mut_ptr(), 1, 0) }.is_err());
+        held.join().unwrap();
     }
 
     #[test]
@@ -323,13 +451,13 @@ mod tests {
         // A poll that could not be woken would make shutdown hang, which is the failure this
         // whole design is meant to remove.
         let queue = Queue::new();
-        let poller = Arc::new(queue.poller(0));
+        let poller = Arc::new(queue.poller());
         let waker = poller.clone();
         let handle = std::thread::spawn(move || {
             let mut out = [KtCompletion {
                 req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
             }; 1];
-            unsafe { waker.poll(out.as_mut_ptr(), 1, -1) }
+            unsafe { waker.poll(out.as_mut_ptr(), 1, -1) }.unwrap()
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         poller.wake();
@@ -339,14 +467,14 @@ mod tests {
     #[test]
     fn a_blocked_poll_receives_a_later_push() {
         let queue = Queue::new();
-        let poller = Arc::new(queue.poller(0));
+        let poller = Arc::new(queue.poller());
         let sender = queue.sender();
         let reader = poller.clone();
         let handle = std::thread::spawn(move || {
             let mut out = [KtCompletion {
                 req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
             }; 1];
-            let n = unsafe { reader.poll(out.as_mut_ptr(), 1, -1) };
+            let n = unsafe { reader.poll(out.as_mut_ptr(), 1, -1) }.unwrap();
             (n, out[0].req_id)
         });
         std::thread::sleep(std::time::Duration::from_millis(100));

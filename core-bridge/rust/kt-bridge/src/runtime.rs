@@ -58,7 +58,8 @@ impl RuntimeEntry {
         for req_id in outstanding {
             sender.push(Pending::error(req_id, KT_ERR_SHUTDOWN, "runtime is shutting down"));
         }
-        self.queue.wake_all();
+        // Sticky close, so a pump re-entering poll after shutdown returns instead of parking.
+        self.queue.close();
     }
 }
 

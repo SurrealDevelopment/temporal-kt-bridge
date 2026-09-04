@@ -67,16 +67,36 @@ impl HandleTable {
     ///
     /// The generation bump is why a double free is an error rather than a second removal of
     /// whatever now occupies the slot.
-    pub fn remove(&self, handle: u64) -> KtResult<Entry> {
+    /// `expected_kind` is checked, not just the index and generation.
+    ///
+    /// Without it a transposed argument -- `kt_poller_free(runtimeHandle)` -- removed the runtime,
+    /// returned KT_OK, and skipped shutdown entirely, leaving every pump parked forever. Kind
+    /// safety used to come only from matching the `Entry` variant on the read path, which the
+    /// remove path never did.
+    pub fn remove_of_kind(&self, handle: u64, expected_kind: u8) -> KtResult<Entry> {
+        // Handle 0 is not a wrong-kind handle, it is not a handle at all -- a zeroed or
+        // default-initialised field on the JVM side. Report that rather than a kind mismatch,
+        // which would send the reader looking for a transposed argument.
+        if handle == 0 {
+            return Err(KtError::StaleHandle);
+        }
         let index = (handle as u32) as usize;
         let generation = ((handle >> GEN_SHIFT) & GEN_MASK) as u32;
+        if (handle >> KIND_SHIFT) as u8 != expected_kind {
+            return Err(KtError::WrongHandleKind);
+        }
         let mut table = self.inner.write();
         let slot = table.slots.get_mut(index).ok_or(KtError::StaleHandle)?;
         if slot.generation != generation {
             return Err(KtError::StaleHandle);
         }
         let entry = slot.entry.take().ok_or(KtError::StaleHandle)?;
-        slot.generation = slot.generation.wrapping_add(1).max(1);
+        // Mask to the 24 bits that are actually encoded in the handle. Bumping the full u32 and
+        // clamping with `.max(1)` only avoided generation 0 at the 2^32 wrap, while `insert`
+        // encodes `generation & GEN_MASK`: after 2^24 cycles a slot issued a handle whose encoded
+        // generation was 0 while the slot held 0x1000000, so the very first use of a freshly
+        // issued handle came back StaleHandle and the entry leaked.
+        slot.generation = ((slot.generation + 1) & (GEN_MASK as u32)).max(1);
         table.free.push(index as u32);
         Ok(entry)
     }
@@ -109,14 +129,20 @@ pub enum Entry {
     Poller(Arc<crate::queue::PollerEntry>),
 }
 
+pub const KIND_RUNTIME: u8 = 1;
+pub const KIND_CLIENT: u8 = 2;
+pub const KIND_WORKER: u8 = 3;
+pub const KIND_EPHEMERAL: u8 = 4;
+pub const KIND_POLLER: u8 = 5;
+
 impl Entry {
     fn kind(&self) -> u8 {
         match self {
-            Entry::Runtime(_) => 1,
-            Entry::Client(_) => 2,
-            Entry::Worker(_) => 3,
-            Entry::Ephemeral(_) => 4,
-            Entry::Poller(_) => 5,
+            Entry::Runtime(_) => KIND_RUNTIME,
+            Entry::Client(_) => KIND_CLIENT,
+            Entry::Worker(_) => KIND_WORKER,
+            Entry::Ephemeral(_) => KIND_EPHEMERAL,
+            Entry::Poller(_) => KIND_POLLER,
         }
     }
 }
@@ -149,7 +175,7 @@ mod tests {
     use crate::queue::Queue;
 
     fn poller_entry() -> Arc<crate::queue::PollerEntry> {
-        Arc::new(Queue::new().poller(0))
+        Arc::new(Queue::new().poller())
     }
 
     #[test]
@@ -172,7 +198,7 @@ mod tests {
     fn a_freed_handle_is_stale_rather_than_undefined() {
         let table = HandleTable::new();
         let handle = table.insert(Entry::Poller(poller_entry()));
-        table.remove(handle).unwrap();
+        table.remove_of_kind(handle, KIND_POLLER).unwrap();
         assert!(matches!(table.poller(handle), Err(KtError::StaleHandle)));
     }
 
@@ -180,8 +206,8 @@ mod tests {
     fn double_free_is_an_error_not_a_second_removal() {
         let table = HandleTable::new();
         let handle = table.insert(Entry::Poller(poller_entry()));
-        table.remove(handle).unwrap();
-        assert!(matches!(table.remove(handle), Err(KtError::StaleHandle)));
+        table.remove_of_kind(handle, KIND_POLLER).unwrap();
+        assert!(matches!(table.remove_of_kind(handle, KIND_POLLER), Err(KtError::StaleHandle)));
     }
 
     #[test]
@@ -190,11 +216,47 @@ mod tests {
         // to whatever object landed in the recycled slot.
         let table = HandleTable::new();
         let first = table.insert(Entry::Poller(poller_entry()));
-        table.remove(first).unwrap();
+        table.remove_of_kind(first, KIND_POLLER).unwrap();
         let second = table.insert(Entry::Poller(poller_entry()));
         assert_ne!(first, second, "slot reuse must change the handle");
         assert!(matches!(table.poller(first), Err(KtError::StaleHandle)));
         assert!(table.poller(second).is_ok());
+    }
+
+    /// Freeing must check the kind too, not only index and generation.
+    ///
+    /// It did not, so `kt_poller_free(runtimeHandle)` removed the runtime, returned KT_OK, and
+    /// skipped shutdown -- leaving every pump parked forever on a runtime that no longer existed.
+    #[test]
+    fn freeing_with_the_wrong_kind_is_rejected_and_leaves_the_entry_alive() {
+        let table = HandleTable::new();
+        let handle = table.insert(Entry::Poller(poller_entry()));
+        assert!(matches!(
+            table.remove_of_kind(handle, KIND_RUNTIME),
+            Err(KtError::WrongHandleKind)
+        ));
+        assert!(table.poller(handle).is_ok(), "a rejected free must not remove the entry");
+    }
+
+    /// Only 24 bits of the generation are encoded in a handle, so the bump must wrap in 24 bits.
+    ///
+    /// Bumping the full u32 meant that after 2^24 cycles a slot issued a handle encoding
+    /// generation 0 while holding 0x1000000: the first use of a brand-new handle returned
+    /// StaleHandle and the entry could never be freed.
+    #[test]
+    fn a_slot_stays_usable_across_the_generation_wrap() {
+        let table = HandleTable::new();
+        // Drive one slot past 2^24 reuses by forcing the counter near the boundary.
+        {
+            let mut inner = table.inner.write();
+            inner.slots.push(Slot { generation: 0x00FF_FFFF, entry: None });
+            inner.free.push(0);
+        }
+        for _ in 0..4 {
+            let handle = table.insert(Entry::Poller(poller_entry()));
+            assert!(table.poller(handle).is_ok(), "a freshly issued handle must resolve");
+            table.remove_of_kind(handle, KIND_POLLER).unwrap();
+        }
     }
 
     #[test]
