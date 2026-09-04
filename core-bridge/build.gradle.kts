@@ -308,6 +308,41 @@ nativePlatforms.forEach { platform ->
     }
 }
 
+// The new purpose-built bridge (rust/), built for tests while it is developed alongside the C
+// bridge. It is not shipped yet: the classifier JARs still carry the C bridge, and this task
+// exists so the new crate's ABI and completion queue can be exercised from the JVM -- which is
+// the only place the design's central claim (no upcalls, one struct, handles not pointers) can
+// actually be checked.
+val ktBridgeLib = "${libPrefix}kt_bridge.$libExtension"
+
+val cargoBuildKtBridge by tasks.registering(Exec::class) {
+    description = "Build the kt-bridge native library for the host platform"
+    group = "build"
+    workingDir = file("rust/kt-bridge")
+    commandLine("cargo", "build")
+
+    inputs.files(
+        fileTree("rust/kt-bridge") {
+            include("Cargo.toml", "Cargo.lock", "build.rs")
+            include("src/**/*.rs", "proto/**/*.proto")
+        },
+    )
+    inputs.property("targetPlatform", nativePlatform)
+    outputs.file("rust/kt-bridge/target/debug/$ktBridgeLib")
+}
+
+// Point the test JVM at the freshly built library by path. Nothing is packaged: the crate has no
+// consumers yet beyond its own tests.
+tasks.withType<Test>().configureEach {
+    dependsOn(cargoBuildKtBridge)
+    systemProperty(
+        "kt.bridge.libraryPath",
+        layout.projectDirectory
+            .file("rust/kt-bridge/target/debug/$ktBridgeLib")
+            .asFile.absolutePath,
+    )
+}
+
 // Host-platform native library, exposed to other modules in this build.
 //
 // A consumer in this build declares

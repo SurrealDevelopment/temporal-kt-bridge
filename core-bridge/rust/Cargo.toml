@@ -1,46 +1,58 @@
-[package]
-name = "kt-bridge"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-description = "FFI bridge between temporal-kt (JVM) and the Temporal Rust SDK-Core"
-publish = false
+[workspace]
+resolver = "2"
+members = [
+    "sdk-core/crates/sdk-core",
+    "sdk-core/crates/client",
+    "sdk-core/crates/common",
+    "sdk-core/crates/common-wasm",
+    "sdk-core/crates/protos",
+    "sdk-core/crates/macros",
+    "sdk-core/crates/sdk",
+    "sdk-core/crates/workflow",
+    "sdk-core/crates/sdk-core-c-bridge",
+]
 
-[lib]
-name = "kt_bridge"
-# rlib alongside cdylib so the safety-critical pieces (handle generations, panic
-# containment, queue ordering) can be unit-tested rather than only exercised through the JVM.
-crate-type = ["cdylib", "rlib"]
+# kt-bridge is its own workspace, not a member.
+#
+# It depends on temporalio-protos from crates.io while the vendored sdk-core above provides a path
+# copy of the same crate, and `links = "temporalio_protos"` may only be claimed once per
+# dependency graph. Separate workspaces (and separate lockfiles) let the C bridge keep shipping
+# while the replacement is built next to it; this exclusion disappears with the C bridge.
+exclude = ["kt-bridge"]
 
-[dependencies]
-# SDK-Core comes from crates.io. There is no submodule and no fork: everything the previous
-# C-bridge fork patched is reachable through Core's public Rust API (see src/ephemeral.rs and
-# src/worker.rs), so the patches are unnecessary rather than merely carried elsewhere.
-temporalio-sdk-core = { version = "0.8", features = ["ephemeral-server", "otel"] }
-temporalio-client = "0.8"
-temporalio-common = { version = "0.8", features = ["core-based-sdk", "otel"] }
+[workspace.package]
+license = "MIT"
+license-file = "sdk-core/LICENSE.txt"
 
-anyhow = "1"
+# Mirror sdk-core's workspace dependencies so inheritance works
+[workspace.dependencies]
+bon = { version = "3", default-features = false, features = ["alloc", "implied-bounds"] }
+derive_more = { version = "2.0", default-features = false, features = [
+    "constructor",
+    "display",
+    "from",
+    "into",
+    "debug",
+    "try_into",
+] }
 thiserror = "2"
-futures-util = { version = "0.3", default-features = false }
-parking_lot = "0.12"
+tonic = { version = "0.14.6", default-features = false }
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
+opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
 prost = "0.14"
 prost-types = { version = "0.7", package = "prost-wkt-types" }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
-tokio-util = "0.7"
-tonic = { version = "0.14", default-features = false }
-tracing = "0.1"
-url = "2"
+pbjson = "0.9"
+pbjson-build = "0.9"
+serde_json = "1.0"
 
-[build-dependencies]
-prost-build = "0.14"
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(tokio_unstable)'] }
 
-[profile.release]
-# The library ships in every consumer's classpath, and its size was never watched: the C bridge
-# reached 36.9 MB, 12.4 MB of it symbol tables. panic = "unwind" is mandatory, not stylistic --
-# every entry point relies on catch_unwind (see src/panic.rs).
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-strip = "debuginfo"
-panic = "unwind"
+[workspace.lints.clippy]
+dbg_macro = "warn"
+
+[profile.release-lto]
+inherits = "release"
+lto = true
