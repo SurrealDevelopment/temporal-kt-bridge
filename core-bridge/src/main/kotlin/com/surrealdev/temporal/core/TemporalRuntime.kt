@@ -1,127 +1,65 @@
 package com.surrealdev.temporal.core
 
-import com.surrealdev.temporal.core.internal.CoreMetricsBridge
-import com.surrealdev.temporal.core.internal.TemporalCoreRuntime
-import io.opentelemetry.api.metrics.Meter
-import java.lang.foreign.Arena
-import java.lang.foreign.MemorySegment
+import com.surrealdev.temporal.core.kt.KtRuntime
 
 /**
- * A Temporal Core runtime instance.
+ * A Temporal Core runtime.
  *
- * The runtime is the entry point for all Temporal operations. It manages
- * the underlying Tokio async runtime and provides factory methods for
- * creating clients and workers.
+ * Owns the native runtime and the single pump thread that drains its completion queue. Everything
+ * else -- clients, workers, dev servers -- is created from one of these and shares its queue.
  *
- * Runtimes are thread-safe and should be reused across the application.
- * Creating multiple runtimes is supported but generally unnecessary.
- *
- * Example usage:
  * ```kotlin
- * TemporalRuntime().use { runtime ->
- *     val client = runtime.createClient(ClientOptions(targetHost = "localhost:7233"))
- *     // Use the client...
+ * TemporalRuntime.create().use { runtime ->
+ *     val client = TemporalCoreClient.connect(runtime, ClientOptions(targetUrl = "http://localhost:7233"))
  * }
  * ```
  *
- * @throws TemporalCoreException if runtime creation fails
+ * @throws TemporalCoreException if the runtime cannot be created
  */
 class TemporalRuntime private constructor(
-    internal val handle: MemorySegment,
-    private val arena: Arena,
-    private val metricsBridge: CoreMetricsBridge?,
+    internal val kt: KtRuntime,
 ) : AutoCloseable {
     @Volatile
     private var closed = false
 
     companion object {
-        /**
-         * Creates a new Temporal runtime with default options.
-         *
-         * @return A new TemporalRuntime instance
-         * @throws TemporalCoreException if runtime creation fails
-         */
+        /** Creates a runtime with default options. */
         fun create(): TemporalRuntime = create(coreMetricsMeter = null)
 
         /**
-         * Creates a new Temporal runtime, optionally bridging Core SDK metrics to OTel.
+         * Creates a runtime.
          *
-         * When [coreMetricsMeter] is non-null, it must be an `io.opentelemetry.api.metrics.Meter`
-         * instance. Core SDK internal metrics (schedule-to-start latency, sticky cache hit rates,
-         * worker slot usage, etc.) will be forwarded through the OTel pipeline.
-         *
-         * The parameter is typed as [Any] to avoid coupling callers to the OTel API. The cast
-         * is performed internally.
-         *
-         * @param coreMetricsMeter An OTel Meter instance (or null for no Core metrics)
-         * @return A new TemporalRuntime instance
-         * @throws TemporalCoreException if runtime creation fails
+         * [coreMetricsMeter] is accepted for source compatibility but no longer used: Core's own
+         * Prometheus and OTLP exporters replace the eight custom-meter callbacks the previous
+         * bridge ran on Tokio threads, each of which needed a blanket `catch (Throwable)` to stop
+         * an exception crossing the FFI boundary. Passing a meter has no effect.
          */
+        @Suppress("UNUSED_PARAMETER")
         fun create(
             coreMetricsMeter: Any?,
             workerHeartbeatIntervalMs: Long = 60_000L,
-        ): TemporalRuntime {
-            val bridge =
-                if (coreMetricsMeter != null) {
-                    CoreMetricsBridge(coreMetricsMeter as Meter)
-                } else {
-                    null
-                }
-
-            val arena = Arena.ofShared()
-            return try {
-                val handle =
-                    if (bridge != null) {
-                        val telemetryOptions = bridge.buildTelemetryOptions()
-                        TemporalCoreRuntime.createRuntime(arena, telemetryOptions, workerHeartbeatIntervalMs)
-                    } else {
-                        TemporalCoreRuntime.createRuntime(arena, MemorySegment.NULL, workerHeartbeatIntervalMs)
-                    }
-                TemporalRuntime(handle, arena, bridge)
-            } catch (e: Exception) {
-                bridge?.close()
-                arena.close()
-                throw e
-            }
-        }
+        ): TemporalRuntime = TemporalRuntime(KtRuntime.create())
     }
 
-    /**
-     * Checks if this runtime has been closed.
-     */
     fun isClosed(): Boolean = closed
 
     /**
-     * Closes this runtime and releases all associated resources.
+     * Closes the runtime.
      *
-     * After calling this method, the runtime can no longer be used.
-     * All clients and workers created from this runtime become invalid.
-     *
-     * Close ordering is critical: freeRuntime first (Core may call metric
-     * callbacks during shutdown), then close the metrics bridge (invalidates
-     * upcall stubs), then close the arena.
+     * Freeing the native runtime answers every outstanding request and closes the completion
+     * queue, which releases the pump. Nothing is left waiting, so unlike the previous bridge
+     * there is no 60-second latch here.
      */
     override fun close() {
         if (closed) return
         synchronized(this) {
             if (closed) return
             closed = true
-            // 1. Free the Core runtime — may still call metric callbacks during shutdown
-            TemporalCoreRuntime.freeRuntime(handle)
-            // 2. Close bridge — invalidates upcall stubs (safe now that Core is freed)
-            metricsBridge?.close()
-            // 3. Close arena — frees all native allocations
-            arena.close()
+            kt.close()
         }
     }
 
-    /**
-     * Ensures the runtime is not closed before performing an operation.
-     * @throws IllegalStateException if the runtime is closed
-     */
     internal fun ensureOpen() {
-        if (closed) {
-            throw IllegalStateException("Runtime has been closed")
-        }
+        check(!closed) { "Runtime has been closed" }
     }
 }

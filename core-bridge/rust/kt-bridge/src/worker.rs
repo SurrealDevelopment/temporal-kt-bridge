@@ -16,12 +16,12 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use temporalio_sdk_core::Worker as CoreWorker;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_sdk_core::Worker as CoreWorker;
 use temporalio_sdk_core::{
     PollError, SlotSupplierOptions, TunerHolderOptions, WorkerVersioningStrategy,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::{KT_ERR_FAILED, KtKind};
 use crate::error::{KtError, KtResult};
@@ -34,8 +34,13 @@ use crate::queue::{Pending, Sender};
 /// `finalize_shutdown` unwrapped `None` and aborted the JVM. Here `Finalized` simply has no field
 /// to unwrap, so the mistake is not expressible.
 pub enum WorkerState {
-    Running { core: Arc<CoreWorker>, started: bool },
-    Draining { core: Arc<CoreWorker> },
+    Running {
+        core: Arc<CoreWorker>,
+        started: bool,
+    },
+    Draining {
+        core: Arc<CoreWorker>,
+    },
     Finalized,
 }
 
@@ -59,7 +64,10 @@ pub struct WorkerEntry {
 impl WorkerEntry {
     pub fn new(core: Arc<CoreWorker>, sender: Sender, tokio: tokio::runtime::Handle) -> Self {
         Self {
-            state: Mutex::new(WorkerState::Running { core, started: false }),
+            state: Mutex::new(WorkerState::Running {
+                core,
+                started: false,
+            }),
             sender,
             tokio,
             live_pumps: Arc::new(AtomicUsize::new(3)),
@@ -187,7 +195,11 @@ async fn pump(
 ///     mid-`poll_*` -- precisely the "lang stopped polling before PollError::ShutDown" violation
 ///     this module exists to make impossible. Each pump instead owns an `Arc<CoreWorker>` and
 ///     runs to `ShutDown` on its own; `finalize` waits for them via the completion counter.
-pub fn start(entry: &Arc<WorkerEntry>, runtime: &Arc<crate::runtime::RuntimeEntry>, worker_handle: u64) -> KtResult {
+pub fn start(
+    entry: &Arc<WorkerEntry>,
+    runtime: &Arc<crate::runtime::RuntimeEntry>,
+    worker_handle: u64,
+) -> KtResult {
     let mut guard = entry.state.lock();
     let core = match &*guard {
         WorkerState::Running { core, started } => {
@@ -206,7 +218,11 @@ pub fn start(entry: &Arc<WorkerEntry>, runtime: &Arc<crate::runtime::RuntimeEntr
     drop(guard);
 
     let _entered = runtime.core.tokio_handle().enter();
-    for kind in [TaskKind::WorkflowActivation, TaskKind::Activity, TaskKind::Nexus] {
+    for kind in [
+        TaskKind::WorkflowActivation,
+        TaskKind::Activity,
+        TaskKind::Nexus,
+    ] {
         tokio::spawn(pump(
             core.clone(),
             kind,
@@ -345,15 +361,21 @@ pub async fn complete(core: &Arc<CoreWorker>, task_kind: u32, bytes: &[u8]) -> R
     match task_kind {
         0 => {
             let completion = prost::Message::decode(bytes).map_err(|e| e.to_string())?;
-            core.complete_workflow_activation(completion).await.map_err(|e| e.to_string())
+            core.complete_workflow_activation(completion)
+                .await
+                .map_err(|e| e.to_string())
         }
         1 => {
             let completion = prost::Message::decode(bytes).map_err(|e| e.to_string())?;
-            core.complete_activity_task(completion).await.map_err(|e| e.to_string())
+            core.complete_activity_task(completion)
+                .await
+                .map_err(|e| e.to_string())
         }
         2 => {
             let completion = prost::Message::decode(bytes).map_err(|e| e.to_string())?;
-            core.complete_nexus_task(completion).await.map_err(|e| e.to_string())
+            core.complete_nexus_task(completion)
+                .await
+                .map_err(|e| e.to_string())
         }
         other => Err(format!("unknown task kind {other}")),
     }
@@ -370,6 +392,8 @@ pub async fn complete(core: &Arc<CoreWorker>, task_kind: u32, bytes: &[u8]) -> R
 pub fn heartbeat(entry: &WorkerEntry, core: &Arc<CoreWorker>, bytes: &[u8]) -> KtResult {
     let heartbeat: temporalio_common::protos::coresdk::ActivityHeartbeat =
         prost::Message::decode(bytes)?;
-    entry.tokio.block_on(async { core.record_activity_heartbeat(heartbeat) });
+    entry
+        .tokio
+        .block_on(async { core.record_activity_heartbeat(heartbeat) });
     Ok(())
 }

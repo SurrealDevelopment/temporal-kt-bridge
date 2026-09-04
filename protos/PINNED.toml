@@ -5,7 +5,7 @@
 # re-checks that the working tree still matches `protos.sha256`, and `syncProtosFromCrate`
 # rewrites both from the pinned version.
 #
-# Vendoring rather than reading the sdk-core submodule keeps this module buildable with neither
+# Vendoring rather than reading a checkout of SDK-Core keeps this module buildable with neither
 # cargo nor a submodule checkout, keeps the Gradle build cache relocatable (no absolute
 # ~/.cargo/registry paths in task inputs), and makes a proto bump a reviewable diff.
 crate = "temporalio-protos"

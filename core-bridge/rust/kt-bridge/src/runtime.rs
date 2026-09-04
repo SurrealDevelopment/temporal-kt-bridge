@@ -58,7 +58,11 @@ impl RuntimeEntry {
         };
         let sender = self.queue.sender();
         for req_id in outstanding {
-            sender.push(Pending::error(req_id, KT_ERR_SHUTDOWN, "runtime is shutting down"));
+            sender.push(Pending::error(
+                req_id,
+                KT_ERR_SHUTDOWN,
+                "runtime is shutting down",
+            ));
         }
         // Sticky close, so a pump re-entering poll after shutdown returns instead of parking.
         self.queue.close();
@@ -90,10 +94,7 @@ pub fn new_runtime(config: crate::proto::RuntimeOptions) -> KtResult<Arc<Runtime
     }))
 }
 
-fn apply_log_filter(
-    options: CoreRuntimeOptions,
-    _filter: &str,
-) -> CoreRuntimeOptions {
+fn apply_log_filter(options: CoreRuntimeOptions, _filter: &str) -> CoreRuntimeOptions {
     // Telemetry construction moved between 0.6 and 0.8; wiring the filter through is handled with
     // the log-forwarding work rather than guessed at here.
     options
@@ -165,13 +166,22 @@ mod tests {
     fn drain(entry: &RuntimeEntry, poller: &crate::queue::PollerEntry) -> Vec<(u64, i32)> {
         let mut out = vec![
             crate::abi::KtCompletion {
-                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0,
             };
             16
         ];
         let _ = entry;
         let n = unsafe { poller.poll(out.as_mut_ptr(), 16, 500) }.unwrap();
-        out[..n as usize].iter().map(|r| (r.req_id, r.status)).collect()
+        out[..n as usize]
+            .iter()
+            .map(|r| (r.req_id, r.status))
+            .collect()
     }
 
     #[test]
@@ -207,7 +217,11 @@ mod tests {
         assert_eq!(drain(&entry, &poller), vec![(3, KT_ERR_CANCELLED)]);
         // The operation's own result must not arrive afterwards.
         std::thread::sleep(std::time::Duration::from_millis(500));
-        assert_eq!(drain(&entry, &poller), vec![], "a cancelled request must answer exactly once");
+        assert_eq!(
+            drain(&entry, &poller),
+            vec![],
+            "a cancelled request must answer exactly once"
+        );
     }
 
     #[test]
@@ -225,7 +239,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         free_runtime(entry.clone());
 
-        let mut answered: Vec<u64> = drain(&entry, &poller).into_iter().map(|(id, _)| id).collect();
+        let mut answered: Vec<u64> = drain(&entry, &poller)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         answered.sort_unstable();
         assert_eq!(answered, vec![10, 11, 12, 13]);
     }

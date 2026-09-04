@@ -110,7 +110,30 @@ internal class KtWorker private constructor(
      * shutdown is expected, and it is the exact race that used to abort the JVM with SIGABRT when
      * the C bridge unwrapped a finalized worker.
      */
-    fun heartbeat(proto: ByteArray): Boolean = KtBridge.workerHeartbeat(handle, proto) == KtBridge.KT_OK
+    fun heartbeat(proto: ByteArray) {
+        val status = KtBridge.workerHeartbeat(handle, proto)
+        if (status != KtBridge.KT_OK) {
+            throw TemporalCoreException(
+                message = "activity heartbeat rejected: ${KtBridge.lastError()}",
+                errorType = null,
+                statusCode = status,
+                cause = null,
+                writableStackTrace = true,
+            )
+        }
+    }
+
+    /**
+     * Tells Core to stop handing out work, and returns immediately.
+     *
+     * Split from [shutdown] because a caller polling on another coroutine must be able to join
+     * that poller, and the poll channels do not close until Core starts reporting `ShutDown`.
+     * Calling only [shutdown] from a coroutine that is itself waiting on the poller deadlocks.
+     */
+    fun initiateShutdown() {
+        if (closed) return
+        KtBridge.workerInitiateShutdown(handle)
+    }
 
     /**
      * Shuts down: stop accepting work, wait for all three streams to report `ShutDown`, finalize.

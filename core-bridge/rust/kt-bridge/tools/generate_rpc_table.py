@@ -54,7 +54,9 @@ def usable(name, req, resp):
     if resp.startswith("tonic::codec::Streaming") or "Streaming" in resp:
         return False, "streaming response cannot be returned as one encoded message"
     if req == "()":
-        return False, "unit request has no protobuf encoding"
+        # Not skipped: a unit request just means there is nothing to decode. The SDK's
+        # time-skipping test server needs GetCurrentTime, so it gets its own arm.
+        return True, None
     return True, None
 
 
@@ -65,25 +67,66 @@ def main() -> int:
     blocks, skipped, total = [], [], 0
     for service, _key, accessor in SERVICES:
         rpcs = extract(source, service)
-        arms = []
+        arms, unit_arms = [], []
         for name, req, resp in rpcs:
             ok, why = usable(name, req, resp)
             if not ok:
                 skipped.append(f"{service}.{pascal(name)}: {why}")
                 continue
-            arms.append(f'        "{pascal(name)}" => {name}({req})')
-        total += len(arms)
-        blocks.append((service, accessor, len(arms), ",\n".join(arms)))
+            if req == "()":
+                unit_arms.append(f'        "{pascal(name)}" => {name}()')
+            else:
+                arms.append(f'        "{pascal(name)}" => {name}({req})')
+        total += len(arms) + len(unit_arms)
+        blocks.append((service, accessor, len(arms) + len(unit_arms), ",\n".join(arms), ",\n".join(unit_arms)))
 
     parts = [HEADER]
-    for service, accessor, count, arms in blocks:
+    for service, accessor, count, arms, unit_arms in blocks:
+        # RPCs taking a unit request are dispatched separately: there is nothing to decode, so
+        # they cannot share the macro that decodes a protobuf first.
+        unit_block = (
+            f"    match rpc {{\n{unit_arms},\n        _ => {{}}\n    }}\n" if unit_arms else ""
+        )
+        unit_impl = ""
+        if unit_arms:
+            unit_impl = (
+                "    if let Some(outcome) = "
+                f"call_{accessor}_unit(&mut client, rpc).await? {{\n        return Ok(outcome);\n    }}\n"
+            )
         parts.append(
             f"\n/// {count} RPCs on {service}.\n"
             f"async fn call_{accessor}(connection: &Connection, rpc: &str, bytes: &[u8])"
             f" -> KtResult<RpcOutcome> {{\n"
             f"    let mut client = connection.{accessor}();\n"
+            f"{unit_impl}"
             f"    dispatch!(client, rpc, bytes, {{\n{arms}\n    }})\n}}\n"
         )
+        if unit_arms:
+            names = [a.split('"')[1] for a in unit_arms.split("\n")]
+            methods = [a.split("=> ")[1].split("(")[0] for a in unit_arms.split("\n")]
+            cases = "\n".join(
+                f'        "{n}" => Some(client.{m}(Request::new(())).await),' for n, m in zip(names, methods)
+            )
+            parts.append(
+                f"\n/// Unit-request RPCs on {service}: nothing to decode, so they bypass `dispatch!`.\n"
+                f"async fn call_{accessor}_unit(\n"
+                f"    client: &mut Box<dyn temporalio_client::grpc::{service}>,\n"
+                f"    rpc: &str,\n"
+                f") -> KtResult<Option<RpcOutcome>> {{\n"
+                f"    let result = match rpc {{\n{cases}\n        _ => None,\n    }};\n"
+                f"    Ok(result.map(|r| match r {{\n"
+                f"        Ok(response) => RpcOutcome {{\n"
+                f"            payload: prost::Message::encode_to_vec(&response.into_inner()),\n"
+                f"            status_code: 0,\n"
+                f"            message: String::new(),\n"
+                f"        }},\n"
+                f"        Err(status) => RpcOutcome {{\n"
+                f"            payload: Vec::new(),\n"
+                f"            status_code: status.code() as i32,\n"
+                f"            message: status.message().to_string(),\n"
+                f"        }},\n"
+                f"    }}))\n}}\n"
+            )
     parts.append(FOOTER)
     io.open("src/rpc.rs", "w", encoding="utf-8").write("".join(parts))
 

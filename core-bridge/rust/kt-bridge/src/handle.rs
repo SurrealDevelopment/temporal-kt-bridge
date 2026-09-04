@@ -213,7 +213,10 @@ mod tests {
         let table = HandleTable::new();
         let handle = table.insert(Entry::Poller(poller_entry()));
         table.remove_of_kind(handle, KIND_POLLER).unwrap();
-        assert!(matches!(table.remove_of_kind(handle, KIND_POLLER), Err(KtError::StaleHandle)));
+        assert!(matches!(
+            table.remove_of_kind(handle, KIND_POLLER),
+            Err(KtError::StaleHandle)
+        ));
     }
 
     #[test]
@@ -241,7 +244,10 @@ mod tests {
             table.remove_of_kind(handle, KIND_RUNTIME),
             Err(KtError::WrongHandleKind)
         ));
-        assert!(table.poller(handle).is_ok(), "a rejected free must not remove the entry");
+        assert!(
+            table.poller(handle).is_ok(),
+            "a rejected free must not remove the entry"
+        );
     }
 
     /// Only 24 bits of the generation are encoded in a handle, so the bump must wrap in 24 bits.
@@ -255,12 +261,18 @@ mod tests {
         // Drive one slot past 2^24 reuses by forcing the counter near the boundary.
         {
             let mut inner = table.inner.write();
-            inner.slots.push(Slot { generation: 0x00FF_FFFF, entry: None });
+            inner.slots.push(Slot {
+                generation: 0x00FF_FFFF,
+                entry: None,
+            });
             inner.free.push(0);
         }
         for _ in 0..4 {
             let handle = table.insert(Entry::Poller(poller_entry()));
-            assert!(table.poller(handle).is_ok(), "a freshly issued handle must resolve");
+            assert!(
+                table.poller(handle).is_ok(),
+                "a freshly issued handle must resolve"
+            );
             table.remove_of_kind(handle, KIND_POLLER).unwrap();
         }
     }
@@ -269,6 +281,9 @@ mod tests {
     fn the_wrong_handle_kind_is_rejected() {
         let table = HandleTable::new();
         let poller = table.insert(Entry::Poller(poller_entry()));
-        assert!(matches!(table.worker(poller), Err(KtError::WrongHandleKind)));
+        assert!(matches!(
+            table.worker(poller),
+            Err(KtError::WrongHandleKind)
+        ));
     }
 }

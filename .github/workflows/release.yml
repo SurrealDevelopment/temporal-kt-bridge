@@ -75,14 +75,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: 'recursive'
       - name: Cache native library
         id: native-cache
         uses: actions/cache@v4
         with:
           path: ${{ matrix.artifact-path }}
-          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/Cargo.lock', 'core-bridge/rust/Cargo.toml', 'core-bridge/rust/sdk-core/rust-toolchain.toml', 'core-bridge/rust/sdk-core/**/*.rs', 'core-bridge/rust/sdk-core/**/Cargo.toml') }}
+          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/kt-bridge/Cargo.lock', 'core-bridge/rust/kt-bridge/rust-toolchain.toml', 'core-bridge/rust/kt-bridge/src/**') }}
       - uses: actions/setup-java@v4
         if: steps.native-cache.outputs.cache-hit != 'true'
         with:
@@ -145,8 +143,6 @@ jobs:
       contents: write  # release asset uploads
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: 'recursive'
       - uses: actions/setup-java@v4
         with:
           java-version: '25'

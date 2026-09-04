@@ -35,17 +35,17 @@ supported; `NativeLoader` fails with an explicit message rather than a confusing
 
 ## Building
 
-Requires JDK 25, a Rust toolchain meeting `core-bridge/rust/sdk-core/rust-toolchain.toml`
+Requires JDK 25, a Rust toolchain meeting `core-bridge/rust/kt-bridge/rust-toolchain.toml`
 (currently 1.94; note that rustup will not pick that file up from the outer workspace directory,
 so your default toolchain must satisfy it), and `protoc` is supplied by Gradle.
 
 ```bash
-git clone --recurse-submodules https://github.com/SurrealDevelopment/temporal-kt-bridge.git
+git clone https://github.com/SurrealDevelopment/temporal-kt-bridge.git
 cd temporal-kt-bridge
 ./gradlew build
 ```
 
-The `sdk-core` submodule points at a fork; see `core-bridge/README.md` for the carried patches and
+SDK-Core comes from crates.io -- no submodule, no fork. See `core-bridge/README.md` for
 the procedure for moving to a newer upstream.
 
 ## Working on the bridge together with temporal-kt

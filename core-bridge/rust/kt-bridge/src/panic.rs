@@ -119,7 +119,10 @@ mod tests {
         // The whole reason this crate exists in this shape: a panic crossing extern "C" aborts
         // the host JVM. If this test ever fails it does so by killing the test process.
         assert_eq!(guard(|| panic!("boom")), KT_ERR_PANIC);
-        assert!(with_last_error(|m| m.contains("boom")), "panic text must reach kt_last_error");
+        assert!(
+            with_last_error(|m| m.contains("boom")),
+            "panic text must reach kt_last_error"
+        );
     }
 
     #[test]

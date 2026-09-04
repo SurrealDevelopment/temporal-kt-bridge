@@ -2,17 +2,9 @@ package com.surrealdev.temporal.core
 
 import com.google.protobuf.CodedInputStream
 import com.google.protobuf.MessageLite
-import com.surrealdev.temporal.core.internal.ClientCallbackDispatcher
-import com.surrealdev.temporal.core.internal.ClientTlsOptions
-import com.surrealdev.temporal.core.internal.FactoryArenaScope
-import com.surrealdev.temporal.core.internal.nativeCallbackException
-import kotlinx.coroutines.suspendCancellableCoroutine
+import com.surrealdev.temporal.core.kt.KtClient
+import com.surrealdev.temporal.core.kt.KtService
 import org.slf4j.LoggerFactory
-import java.lang.foreign.Arena
-import java.lang.foreign.MemorySegment
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import com.surrealdev.temporal.core.internal.TemporalCoreClient as InternalClient
 
 /**
  * Transport-level gRPC compression for client connections.
@@ -35,14 +27,6 @@ data class ClientOptions(
     val grpcCompression: GrpcCompression = GrpcCompression.GZIP,
 )
 
-private fun TlsConfig.toClientTlsOptions(): ClientTlsOptions =
-    ClientTlsOptions(
-        serverRootCaCert = serverRootCaCert,
-        domain = domain,
-        clientCert = clientCert,
-        clientPrivateKey = clientPrivateKey,
-    )
-
 /**
  * A high-level wrapper for the Temporal Core client.
  *
@@ -60,12 +44,16 @@ private fun TlsConfig.toClientTlsOptions(): ClientTlsOptions =
  *     }
  * }
  * ```
+ *
+ * A client connection to a Temporal server.
+ *
+ * Every call is one suspending request answered by exactly one completion from the bridge, so an
+ * ordinary coroutine cancellation is enough to abandon one. The previous bridge could not cancel
+ * a native call at all: Rust always fired its callback and held `Arc`s until it did.
  */
 class TemporalCoreClient private constructor(
-    internal val handle: MemorySegment,
-    private val arena: Arena,
-    private val callbackArena: Arena,
-    private val dispatcher: ClientCallbackDispatcher,
+    internal val kt: KtClient,
+    private val runtime: TemporalRuntime,
     val targetUrl: String,
     val namespace: String,
 ) : AutoCloseable {
@@ -76,25 +64,9 @@ class TemporalCoreClient private constructor(
         private val logger = LoggerFactory.getLogger(TemporalCoreClient::class.java)
 
         /**
-         * Connects to a Temporal server asynchronously.
+         * Connects to a Temporal server.
          *
-         * TLS is automatically enabled when the target URL uses the `https://` scheme,
-         * or when an API key is provided.
-         * For custom CA certificates, client certificates (mTLS), or domain overrides,
-         * provide a [TlsConfig] instance.
-         *
-         * @param runtime The Temporal runtime to use
-         * @param targetUrl The server address (e.g., "localhost:7233" or "myns.tmprl.cloud:7233").
-         *                  Scheme is optional — if omitted, `http://` or `https://` is inferred from TLS settings.
-         * @param namespace The namespace to use (default: "default")
-         * @param options Additional client options
-         * @param tls TLS configuration. If null and URL is https:// or apiKey is set, uses system CA certificates.
-         *            Provide a [TlsConfig] for custom CA certificates, client certificates (mTLS), or domain overrides.
-         * @param apiKey API key for Temporal Cloud authentication (alternative to mTLS).
-         *               When set, TLS is auto-enabled unless [tlsDisabled] is true.
-         * @param tlsDisabled Explicitly disable TLS even when an API key is set. Useful for testing through proxies.
-         * @return A connected client instance
-         * @throws TemporalCoreException if connection fails
+         * @throws TemporalCoreException if the connection cannot be established
          */
         suspend fun connect(
             runtime: TemporalRuntime,
@@ -107,207 +79,113 @@ class TemporalCoreClient private constructor(
         ): TemporalCoreClient {
             runtime.ensureOpen()
 
-            // Warn about contradictory TLS configurations
             if (tlsDisabled && tls != null) {
-                logger.warn("tlsDisabled=true but explicit TLS config was provided. TLS will NOT be used.")
+                logger.warn("tlsDisabled=true but an explicit TLS config was provided; TLS will NOT be used.")
             }
             if (tlsDisabled && targetUrl.startsWith("https://", ignoreCase = true)) {
-                logger.warn("tlsDisabled=true but target URL uses https:// scheme. TLS will NOT be used.")
+                logger.warn("tlsDisabled=true but the target URL is https://; TLS will NOT be used.")
             }
 
-            // Determine effective TLS configuration
-            val effectiveTls =
-                when {
-                    tlsDisabled -> null
-                    tls != null -> tls.toClientTlsOptions()
-                    targetUrl.startsWith("https://", ignoreCase = true) -> ClientTlsOptions()
-                    apiKey != null -> ClientTlsOptions()
-                    else -> null
-                }
-
-            // Normalize target URL — Rust Core SDK requires a scheme
             val normalizedUrl =
-                when {
-                    targetUrl.startsWith("http://", ignoreCase = true) ||
-                        targetUrl.startsWith("https://", ignoreCase = true) -> targetUrl
-
-                    effectiveTls != null -> "https://$targetUrl"
-
-                    else -> "http://$targetUrl"
+                if (targetUrl.startsWith("http://", true) || targetUrl.startsWith("https://", true)) {
+                    targetUrl
+                } else {
+                    val useTls = !tlsDisabled && (tls != null || apiKey != null)
+                    if (useTls) "https://$targetUrl" else "http://$targetUrl"
                 }
 
-            val scope = FactoryArenaScope.create(runtime.handle, ::ClientCallbackDispatcher)
-
-            return try {
-                val clientPtr =
-                    suspendCancellableCoroutine { continuation ->
-                        val contextPtr =
-                            InternalClient.connect(
-                                runtimePtr = runtime.handle,
-                                optionsArena = scope.resourceArena,
-                                dispatcher = scope.dispatcher,
-                                targetUrl = normalizedUrl,
-                                namespace = namespace,
-                                clientName = options.clientName,
-                                clientVersion = options.clientVersion,
-                                identity = options.identity,
-                                tls = effectiveTls,
-                                apiKey = apiKey,
-                                grpcCompression = options.grpcCompression,
-                            ) { clientPtr, error ->
-                                try {
-                                    when {
-                                        error != null -> {
-                                            continuation.resumeWithException(nativeCallbackException(error))
-                                        }
-
-                                        clientPtr != null -> {
-                                            continuation.resume(clientPtr)
-                                        }
-
-                                        else -> {
-                                            continuation.resumeWithException(
-                                                nativeCallbackException("Connect returned null without error"),
-                                            )
-                                        }
-                                    }
-                                } catch (_: IllegalStateException) {
-                                    // Continuation already resumed, ignore
-                                }
-                            }
-
-                        // Note: We intentionally do NOT cancel on coroutine cancellation.
-                        // The Rust callback will always fire, and we must wait for it to complete.
-                    }
-
-                scope.transferOwnership()
-                TemporalCoreClient(
-                    handle = clientPtr,
-                    arena = scope.resourceArena,
-                    callbackArena = scope.callbackArena,
-                    dispatcher = scope.dispatcher,
-                    targetUrl = normalizedUrl,
-                    namespace = namespace,
+            val client =
+                KtClient.connect(
+                    runtime.kt,
+                    ClientOptionsProto.encode(
+                        targetUrl = normalizedUrl,
+                        namespace = namespace,
+                        identity = options.identity.orEmpty(),
+                        apiKey = apiKey.orEmpty(),
+                    ),
                 )
-            } catch (e: Exception) {
-                scope.close()
-                throw e
-            }
+            return TemporalCoreClient(client, runtime, normalizedUrl, namespace)
         }
     }
 
-    /**
-     * Checks if this client has been closed.
-     */
     fun isClosed(): Boolean = closed
 
-    /**
-     * Ensures the client is not closed before performing an operation.
-     * @throws IllegalStateException if the client is closed
-     */
-    internal fun ensureOpen() {
-        if (closed) {
-            throw IllegalStateException("Client has been closed")
-        }
+    private fun ensureOpen() {
+        check(!closed) { "Client has been closed" }
+        runtime.ensureOpen()
     }
 
     /**
-     * Makes an RPC call to the Temporal workflow service with zero-copy protobuf serialization and parsing.
+     * Calls a WorkflowService RPC.
      *
-     * Uses reusable callback stubs via the dispatcher for better performance.
-     * Both request serialization and response parsing use zero-copy:
-     * - Request is serialized directly to native memory without intermediate ByteArray
-     * - Response is parsed directly from native memory without intermediate ByteArray copy
-     *
-     * @param rpc The RPC method name (e.g., "StartWorkflowExecution")
-     * @param request The request protobuf message
-     * @param parser Function that parses the CodedInputStream into the response type
-     * @return The parsed response
-     * @throws TemporalCoreException if the RPC call fails
+     * @param rpc the PascalCase method name, e.g. "StartWorkflowExecution"
+     * @throws TemporalCoreException carrying the server's own gRPC status code on rejection
      */
     suspend fun <Req : MessageLite, Resp : MessageLite> workflowServiceCall(
         rpc: String,
         request: Req,
         timeoutMillis: Int = 0,
         parser: (CodedInputStream) -> Resp,
-    ): Resp = rpcCallInternal(InternalClient.RpcService.WORKFLOW, rpc, request, parser, timeoutMillis)
+    ): Resp = call(KtService.WORKFLOW, rpc, request, parser)
 
-    /**
-     * Makes an RPC call to the Temporal test service with zero-copy protobuf serialization and parsing.
-     *
-     * This is only available when connected to a test server with time-skipping enabled.
-     * Uses reusable callback stubs via the dispatcher for better performance.
-     * Both request serialization and response parsing use zero-copy:
-     * - Request is serialized directly to native memory without intermediate ByteArray
-     * - Response is parsed directly from native memory without intermediate ByteArray copy
-     *
-     * @param rpc The RPC method name (e.g., "LockTimeSkipping", "GetCurrentTime")
-     * @param request The request protobuf message
-     * @param parser Function that parses the CodedInputStream into the response type
-     * @return The parsed response
-     * @throws TemporalCoreException if the RPC call fails
-     */
+    /** Calls a TestService RPC. Only available against a test server with time skipping. */
     suspend fun <Req : MessageLite, Resp : MessageLite> testServiceCall(
         rpc: String,
         request: Req,
         timeoutMillis: Int = 0,
         parser: (CodedInputStream) -> Resp,
-    ): Resp = rpcCallInternal(InternalClient.RpcService.TEST, rpc, request, parser, timeoutMillis)
+    ): Resp = call(KtService.TEST, rpc, request, parser)
 
-    // ============================================================
-    // Private RPC Helpers
-    // ============================================================
-
-    private suspend fun <Req : MessageLite, Resp : MessageLite> rpcCallInternal(
-        service: InternalClient.RpcService,
+    private suspend fun <Req : MessageLite, Resp : MessageLite> call(
+        service: KtService,
         rpc: String,
         request: Req,
         parser: (CodedInputStream) -> Resp,
-        timeoutMillis: Int = 0,
     ): Resp {
         ensureOpen()
-        return dispatcher.withManagedArena { arena, continuation ->
-            InternalClient.rpcCall(
-                clientPtr = handle,
-                arena = arena,
-                dispatcher = dispatcher,
-                service = service,
-                rpc = rpc,
-                request = request,
-                parser = parser,
-                timeoutMillis = timeoutMillis,
-            ) { response, statusCode, failureMessage, _ ->
-                with(dispatcher) { continuation.resumeRpcResult(response, statusCode, failureMessage) }
-            }
-        }
+        val response = kt.call(service, rpc, request.toByteArray())
+        return parser(CodedInputStream.newInstance(response))
     }
 
-    /**
-     * Closes this client and releases all associated resources.
-     *
-     * After calling this method, the client can no longer be used.
-     */
     override fun close() {
         if (closed) return
         synchronized(this) {
             if (closed) return
             closed = true
-
-            // MUST await BEFORE freeing - Tokio tasks hold references to Client
-            val completed = dispatcher.awaitPendingCallbacks(timeoutSeconds = 60)
-            if (!completed) {
-                logger.warn(
-                    "[TemporalCoreClient] Timeout waiting for pending callbacks during close(). " +
-                        "Proceeding with cleanup anyway. This may indicate a Rust panic or stuck gRPC call.",
-                )
-            }
-
-            // NOW safe to free (or as safe as we can make it)
-            InternalClient.freeClient(handle)
-
-            dispatcher.close()
-            arena.close()
-            callbackArena.close()
+            kt.close()
         }
+    }
+}
+
+/** Encodes `kt_bridge.ClientOptions` by hand: the bridge's own config protos are not published. */
+internal object ClientOptionsProto {
+    fun encode(
+        targetUrl: String,
+        namespace: String,
+        identity: String,
+        apiKey: String,
+    ): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+
+        fun field(
+            number: Int,
+            value: String,
+        ) {
+            if (value.isEmpty()) return
+            val bytes = value.toByteArray(Charsets.UTF_8)
+            out.write((number shl 3) or 2)
+            var length = bytes.size
+            while (length >= 0x80) {
+                out.write((length and 0x7F) or 0x80)
+                length = length ushr 7
+            }
+            out.write(length)
+            out.write(bytes)
+        }
+        field(1, targetUrl)
+        field(2, namespace)
+        field(3, identity)
+        field(6, apiKey)
+        return out.toByteArray()
     }
 }

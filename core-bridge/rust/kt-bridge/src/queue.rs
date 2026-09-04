@@ -37,7 +37,14 @@ pub struct Pending {
 
 impl Pending {
     pub fn ack(req_id: u64) -> Self {
-        Self { req_id, kind: KtKind::Ack, status: crate::abi::KT_OK, payload: Vec::new(), aux0: 0, aux1: 0 }
+        Self {
+            req_id,
+            kind: KtKind::Ack,
+            status: crate::abi::KT_OK,
+            payload: Vec::new(),
+            aux0: 0,
+            aux1: 0,
+        }
     }
 
     pub fn error(req_id: u64, status: i32, message: impl Into<String>) -> Self {
@@ -182,7 +189,9 @@ impl Queue {
     }
 
     pub fn sender(&self) -> Sender {
-        Sender { shared: self.shared.clone() }
+        Sender {
+            shared: self.shared.clone(),
+        }
     }
 
     pub fn poller(&self) -> PollerEntry {
@@ -219,7 +228,12 @@ impl PollerEntry {
     /// `out` must point to at least `cap` writable, 8-byte-aligned [`KtCompletion`] slots, and
     /// must remain valid for the duration of the call. Payload pointers in the returned records
     /// borrow this poller's slab and stay valid only until this poller's next `poll`.
-    pub unsafe fn poll(&self, out: *mut KtCompletion, cap: u32, timeout_millis: i32) -> KtResult<u32> {
+    pub unsafe fn poll(
+        &self,
+        out: *mut KtCompletion,
+        cap: u32,
+        timeout_millis: i32,
+    ) -> KtResult<u32> {
         if cap == 0 {
             return Ok(0);
         }
@@ -256,7 +270,12 @@ impl PollerEntry {
                 match deadline {
                     None => self.shared.signal.wait(&mut state),
                     Some(deadline) => {
-                        if self.shared.signal.wait_until(&mut state, deadline).timed_out() {
+                        if self
+                            .shared
+                            .signal
+                            .wait_until(&mut state, deadline)
+                            .timed_out()
+                        {
                             break;
                         }
                     }
@@ -275,7 +294,8 @@ impl PollerEntry {
         buf.reset();
         let total: usize = drained.iter().map(|p| p.payload.len()).sum();
         if buf.bytes.len() < total {
-            buf.bytes.resize(total.next_power_of_two().max(64 * 1024), 0);
+            buf.bytes
+                .resize(total.next_power_of_two().max(64 * 1024), 0);
         }
 
         for (index, pending) in drained.iter().enumerate() {
@@ -321,7 +341,15 @@ mod tests {
 
     fn drain(poller: &PollerEntry, cap: u32) -> Vec<KtCompletion> {
         let mut out = vec![
-            KtCompletion { req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0 };
+            KtCompletion {
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0
+            };
             cap as usize
         ];
         let n = unsafe { poller.poll(out.as_mut_ptr(), cap, 0) }.unwrap();
@@ -333,7 +361,9 @@ mod tests {
     fn a_pushed_completion_round_trips_with_its_payload() {
         let queue = Queue::new();
         let poller = queue.poller();
-        queue.sender().push(Pending::ack(7).payload(b"hello".to_vec()));
+        queue
+            .sender()
+            .push(Pending::ack(7).payload(b"hello".to_vec()));
 
         let got = drain(&poller, 8);
         assert_eq!(got.len(), 1);
@@ -362,7 +392,10 @@ mod tests {
                 std::slice::from_raw_parts(record.payload as *const u8, record.payload_len as usize)
             };
             assert_eq!(bytes.len(), 1024);
-            assert!(bytes.iter().all(|&b| b == i as u8), "payload {i} was corrupted by a later one");
+            assert!(
+                bytes.iter().all(|&b| b == i as u8),
+                "payload {i} was corrupted by a later one"
+            );
         }
     }
 
@@ -400,7 +433,13 @@ mod tests {
             let waker = poller.clone();
             let handle = std::thread::spawn(move || {
                 let mut out = [KtCompletion {
-                    req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                    req_id: 0,
+                    kind: 0,
+                    status: 0,
+                    payload: 0,
+                    payload_len: 0,
+                    aux0: 0,
+                    aux1: 0,
                 }; 1];
                 unsafe { waker.poll(out.as_mut_ptr(), 1, -1) }.unwrap()
             });
@@ -419,7 +458,13 @@ mod tests {
         for _ in 0..3 {
             // -1 would park forever if `closed` were one-shot like the old `woken` flag.
             let mut out = [KtCompletion {
-                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0,
             }; 1];
             assert_eq!(unsafe { poller.poll(out.as_mut_ptr(), 1, -1) }.unwrap(), 0);
         }
@@ -432,13 +477,25 @@ mod tests {
         let blocker = poller.clone();
         let held = std::thread::spawn(move || {
             let mut out = [KtCompletion {
-                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0,
             }; 1];
             unsafe { blocker.poll(out.as_mut_ptr(), 1, 400) }.unwrap()
         });
         std::thread::sleep(std::time::Duration::from_millis(80));
         let mut out = [KtCompletion {
-            req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+            req_id: 0,
+            kind: 0,
+            status: 0,
+            payload: 0,
+            payload_len: 0,
+            aux0: 0,
+            aux1: 0,
         }; 1];
         // Would otherwise reset and possibly reallocate the slab under the first thread's
         // still-valid payload pointers.
@@ -455,13 +512,23 @@ mod tests {
         let waker = poller.clone();
         let handle = std::thread::spawn(move || {
             let mut out = [KtCompletion {
-                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0,
             }; 1];
             unsafe { waker.poll(out.as_mut_ptr(), 1, -1) }.unwrap()
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         poller.wake();
-        assert_eq!(handle.join().unwrap(), 0, "a woken poll returns empty rather than hanging");
+        assert_eq!(
+            handle.join().unwrap(),
+            0,
+            "a woken poll returns empty rather than hanging"
+        );
     }
 
     #[test]
@@ -472,7 +539,13 @@ mod tests {
         let reader = poller.clone();
         let handle = std::thread::spawn(move || {
             let mut out = [KtCompletion {
-                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0,
             }; 1];
             let n = unsafe { reader.poll(out.as_mut_ptr(), 1, -1) }.unwrap();
             (n, out[0].req_id)

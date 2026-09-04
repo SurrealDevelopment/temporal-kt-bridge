@@ -63,7 +63,10 @@ pub async fn connect(
     namespace: String,
 ) -> Result<Arc<ClientEntry>, String> {
     match Connection::connect(options).await {
-        Ok(connection) => Ok(Arc::new(ClientEntry { connection, namespace })),
+        Ok(connection) => Ok(Arc::new(ClientEntry {
+            connection,
+            namespace,
+        })),
         Err(err) => Err(format!("{err:#}")),
     }
 }

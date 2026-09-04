@@ -13,7 +13,9 @@ use temporalio_common::protos::temporal::api::workflowservice::v1::{
 
 #[test]
 fn rpcs_round_trip_and_grpc_errors_keep_the_servers_status_code() {
-    let Some(address) = std::env::var("TEMPORAL_TEST_ADDRESS").ok().filter(|s| !s.is_empty())
+    let Some(address) = std::env::var("TEMPORAL_TEST_ADDRESS")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         eprintln!("skipping: set TEMPORAL_TEST_ADDRESS to run this against a dev server");
         return;
@@ -39,31 +41,63 @@ fn rpcs_round_trip_and_grpc_errors_keep_the_servers_status_code() {
             namespace: "default".into(),
             ..Default::default()
         });
-        let ok = rpc::call(&connection.connection, rpc::Service::Workflow, "DescribeNamespace", &request)
-            .await
-            .expect("dispatch");
-        assert_eq!(ok.status_code, 0, "DescribeNamespace failed: {}", ok.message);
+        let ok = rpc::call(
+            &connection.connection,
+            rpc::Service::Workflow,
+            "DescribeNamespace",
+            &request,
+        )
+        .await
+        .expect("dispatch");
+        assert_eq!(
+            ok.status_code, 0,
+            "DescribeNamespace failed: {}",
+            ok.message
+        );
         let decoded: DescribeNamespaceResponse =
             prost::Message::decode(ok.payload.as_slice()).expect("response must decode");
-        assert_eq!(decoded.namespace_info.expect("namespace_info").name, "default");
+        assert_eq!(
+            decoded.namespace_info.expect("namespace_info").name,
+            "default"
+        );
 
         // A server rejection keeps its gRPC code, so the JVM can raise what the server intended.
         let empty = prost::Message::encode_to_vec(&StartWorkflowExecutionRequest::default());
-        let rejected = rpc::call(&connection.connection, rpc::Service::Workflow, "StartWorkflowExecution", &empty)
-            .await
-            .expect("dispatch");
-        assert!(rejected.status_code > 0, "expected a gRPC status, got {}", rejected.status_code);
-        eprintln!("empty StartWorkflowExecution -> gRPC {}", rejected.status_code);
+        let rejected = rpc::call(
+            &connection.connection,
+            rpc::Service::Workflow,
+            "StartWorkflowExecution",
+            &empty,
+        )
+        .await
+        .expect("dispatch");
+        assert!(
+            rejected.status_code > 0,
+            "expected a gRPC status, got {}",
+            rejected.status_code
+        );
+        eprintln!(
+            "empty StartWorkflowExecution -> gRPC {}",
+            rejected.status_code
+        );
 
         // An unknown name is rejected rather than silently doing nothing.
         assert!(
-            rpc::call(&connection.connection, rpc::Service::Workflow, "NoSuchRpc", &[])
-                .await
-                .is_err()
+            rpc::call(
+                &connection.connection,
+                rpc::Service::Workflow,
+                "NoSuchRpc",
+                &[]
+            )
+            .await
+            .is_err()
         );
     });
 }
 
 fn runtime_for_test() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio")
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio")
 }

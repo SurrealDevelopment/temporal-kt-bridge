@@ -47,7 +47,7 @@ internal object KtBridge {
     const val KT_ERR_BUFFER_TOO_SMALL = -9
 
     private val linker: Linker = Linker.nativeLinker()
-    private val lookup = NativeLoader.loadKtBridge()
+    private val lookup = NativeLoader.load()
 
     private fun handle(
         name: String,
@@ -118,6 +118,8 @@ internal object KtBridge {
         )
     private val workerHeartbeatFn =
         handle("kt_worker_heartbeat", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT))
+    private val workerInitiateShutdownFn =
+        handle("kt_worker_initiate_shutdown", FunctionDescriptor.of(JAVA_INT, JAVA_LONG))
     private val workerShutdownFn =
         handle(
             "kt_worker_shutdown",
@@ -314,6 +316,9 @@ internal object KtBridge {
         Arena.ofConfined().use { arena ->
             workerHeartbeatFn.invokeExact(worker, arena.bytes(proto), proto.size) as Int
         }
+
+    fun workerInitiateShutdown(worker: Long) =
+        check(workerInitiateShutdownFn.invokeExact(worker) as Int, "kt_worker_initiate_shutdown")
 
     fun workerShutdown(
         runtime: Long,

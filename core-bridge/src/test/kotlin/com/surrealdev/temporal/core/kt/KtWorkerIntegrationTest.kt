@@ -1,10 +1,11 @@
 package com.surrealdev.temporal.core.kt
 
+import com.surrealdev.temporal.core.TemporalCoreException
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
-import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 /**
  * Worker lifecycle from Kotlin against a real server.
@@ -76,7 +77,9 @@ class KtWorkerIntegrationTest {
                             worker.shutdown(graceMillis = 30_000)
                             // The C bridge unwrapped a finalized worker here and took the whole
                             // JVM down with SIGABRT. Reaching the assertion at all is the test.
-                            assertTrue(!worker.heartbeat(ByteArray(0)), "a finalized worker must refuse heartbeats")
+                            assertFailsWith<TemporalCoreException>("a finalized worker must refuse heartbeats") {
+                                worker.heartbeat(ByteArray(0))
+                            }
                         }
                     }
                 }

@@ -35,7 +35,6 @@ use abi::*;
 use error::{KtError, KtResult};
 use handle::{Entry, HANDLES};
 
-
 /// Copies `src` into a caller-provided buffer, reporting the length it needed.
 ///
 /// # Safety
@@ -79,7 +78,6 @@ unsafe fn slice<'a>(ptr: *const u8, len: u32) -> KtResult<&'a [u8]> {
     }
     Ok(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // ABI and diagnostics
@@ -328,6 +326,26 @@ kt_export! {
         let entry = HANDLES.worker(worker)?;
         let core = entry.core()?;
         worker::heartbeat(&entry, &core, unsafe { slice(proto_bytes, proto_len) }?)
+    }
+}
+
+kt_export! {
+    /// Tells Core to stop handing out new work, without waiting for anything.
+    ///
+    /// This is the first half of `kt_worker_shutdown`, split out because a caller polling on one
+    /// thread needs the poll streams to start reporting ShutDown *before* it can join them, and
+    /// joining is what the second half waits for. Idempotent, and a no-op on an already-finalized
+    /// worker rather than an error -- shutting down twice is not a caller mistake.
+    fn kt_worker_initiate_shutdown(worker: u64) {
+        let entry = HANDLES.worker(worker)?;
+        if let Ok(core) = entry.core() {
+            // `initiate_shutdown` is sync but spawns internally, so it panics with "there is no
+            // reactor running" when called straight off a JVM thread. Entering the worker's
+            // runtime is enough -- unlike `heartbeat` there is nothing to await.
+            let _guard = entry.tokio.enter();
+            core.initiate_shutdown();
+        }
+        Ok(())
     }
 }
 

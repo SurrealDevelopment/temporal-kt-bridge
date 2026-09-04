@@ -16,12 +16,22 @@ use kt_bridge::handle::{Entry, HANDLES};
 use kt_bridge::{client, proto, queue, runtime, worker};
 
 fn server_address() -> Option<String> {
-    std::env::var("TEMPORAL_TEST_ADDRESS").ok().filter(|s| !s.is_empty())
+    std::env::var("TEMPORAL_TEST_ADDRESS")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn empty_batch(n: usize) -> Vec<KtCompletion> {
     vec![
-        KtCompletion { req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0 };
+        KtCompletion {
+            req_id: 0,
+            kind: 0,
+            status: 0,
+            payload: 0,
+            payload_len: 0,
+            aux0: 0,
+            aux1: 0
+        };
         n
     ]
 }
@@ -71,7 +81,9 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
             match client::connect(options, "default".into()).await {
                 Ok(c) => {
                     let handle = HANDLES.insert(Entry::Client(c));
-                    queue::Pending::ack(1).kind(KtKind::ClientConnected).aux0(handle)
+                    queue::Pending::ack(1)
+                        .kind(KtKind::ClientConnected)
+                        .aux0(handle)
                 }
                 Err(message) => queue::Pending::error(1, -8, message),
             }
@@ -95,9 +107,14 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
 
     let core = {
         let _entered = rt.core.tokio_handle().enter();
-        temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone()).expect("init_worker")
+        temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone())
+            .expect("init_worker")
     };
-    let entry = std::sync::Arc::new(worker::WorkerEntry::new(std::sync::Arc::new(core), rt.sender(), rt.core.tokio_handle().clone()));
+    let entry = std::sync::Arc::new(worker::WorkerEntry::new(
+        std::sync::Arc::new(core),
+        rt.sender(),
+        rt.core.tokio_handle().clone(),
+    ));
     let worker_handle = HANDLES.insert(Entry::Worker(entry.clone()));
 
     worker::start(&entry, &rt, worker_handle).expect("start");
@@ -124,9 +141,15 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
     });
 
     let done = done.expect("worker shutdown never completed - this is the hang being tested for");
-    eprintln!("shutdown status={} stream_ends={}", done.status, stream_ends);
+    eprintln!(
+        "shutdown status={} stream_ends={}",
+        done.status, stream_ends
+    );
     assert_eq!(done.status, KT_OK, "shutdown reported an error");
-    assert_eq!(stream_ends, 3, "every poll stream must report ShutDown exactly once");
+    assert_eq!(
+        stream_ends, 3,
+        "every poll stream must report ShutDown exactly once"
+    );
 
     runtime::free_runtime(rt);
 }

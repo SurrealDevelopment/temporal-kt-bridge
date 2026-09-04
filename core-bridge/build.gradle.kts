@@ -63,204 +63,91 @@ val libExtension: String =
         else -> throw GradleException("Unsupported platform")
     }
 
-// Library name from C bridge
-val nativeLibName = "temporalio_sdk_core_c_bridge"
+val nativeLibName = "kt_bridge"
 
 // Output directory for native libraries (in build folder, not src)
 val nativeLibsDir = layout.buildDirectory.dir("native-libs")
 
-// Native build for current platform - builds from parent workspace with locked dependencies
-val cargoBuild by tasks.registering(Exec::class) {
-    description = "Build Temporal SDK Core C bridge for current platform ($nativePlatform)"
-    group = "build"
-    workingDir = file("rust")
-    commandLine("cargo", "build", "--release", "--locked", "-p", "temporalio-sdk-core-c-bridge")
+// Set -PskipNativeBuild=true to skip native library building (used in CI publish job)
+val skipNativeBuild = project.findProperty("skipNativeBuild")?.toString()?.toBoolean() ?: false
 
-    inputs.files(
-        fileTree("rust") {
-            include("Cargo.toml", "Cargo.lock")
-        },
-        fileTree("rust/sdk-core") {
-            // rust-toolchain.toml pins the compiler version, so a change to it changes the
-            // produced library and must invalidate this task.
-            include("**/*.rs", "**/Cargo.toml", "rust-toolchain.toml")
-        },
-    )
-    outputs.file("rust/target/release/${libPrefix}$nativeLibName.$libExtension")
+/**
+ * Registers `cargoBuild<Name>` + `copyNativeLib<Name>` for one target.
+ *
+ * `target` is null for the host build, which cargo writes to `target/release` rather than
+ * `target/<triple>/release`.
+ *
+ * kt-bridge depends on sdk-core from crates.io, so cargo resolves and caches it like any other
+ * dependency -- there is no vendored source tree to declare as an input. The inputs below are
+ * this crate and its lockfile, which is the whole of what we own.
+ */
+fun registerNativeBuild(
+    name: String,
+    resourceDir: String,
+    target: String?,
+    libFile: String,
+): TaskProvider<Copy> {
+    val outDir = if (target == null) "release" else "$target/release"
+    val builtLib = "rust/kt-bridge/target/$outDir/$libFile"
+
+    val build =
+        tasks.register<Exec>("cargoBuild$name") {
+            description = "Build the kt-bridge native library for $resourceDir"
+            group = "build"
+            workingDir = file("rust/kt-bridge")
+            commandLine(
+                buildList {
+                    addAll(listOf("cargo", "build", "--release", "--locked"))
+                    if (target != null) addAll(listOf("--target", target))
+                },
+            )
+
+            inputs.files(
+                fileTree("rust/kt-bridge") {
+                    include("Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml")
+                    include("src/**/*.rs", "proto/**/*.proto")
+                },
+            )
+            outputs.file(builtLib)
+        }
+
+    // Hoisted out of the task action: referencing the script-level `nativeLibsDir` from inside
+    // `doLast` would capture the build script itself, which the configuration cache rejects.
+    val destFile = nativeLibsDir.map { it.dir("native/$resourceDir").file(libFile) }
+
+    return tasks.register<Copy>("copyNativeLib$name") {
+        description = "Copy the $resourceDir native library into the build directory"
+        group = "build"
+        dependsOn(build)
+        from(builtLib)
+        into(nativeLibsDir.map { it.dir("native/$resourceDir") })
+        // A silently empty classifier JAR is the failure this guards: `Copy` no-ops when its
+        // source is missing, so a mis-pathed build would publish nothing and still go green.
+        doLast {
+            val dest = destFile.get().asFile
+            if (!dest.isFile) throw GradleException("native library missing after copy: $dest")
+        }
+    }
 }
 
-val copyNativeLib by tasks.registering(Copy::class) {
-    description = "Copy native library for current platform to build directory"
-    group = "build"
-    dependsOn(cargoBuild)
-
-    from("rust/target/release/${libPrefix}$nativeLibName.$libExtension")
-    into(nativeLibsDir.map { it.dir("native/$nativePlatform") })
-}
-
-// Native build for Linux x86_64 (runs on x86_64 Linux runner)
-val cargoBuildLinuxx8664 by tasks.registering(Exec::class) {
-    description = "Build native library for linux-x86_64-gnu"
-    group = "build"
-    workingDir = file("rust")
-    commandLine(
-        "cargo",
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "temporalio-sdk-core-c-bridge",
-        "--target",
-        "x86_64-unknown-linux-gnu",
-    )
-
-    inputs.files(
-        fileTree("rust") {
-            include("Cargo.toml", "Cargo.lock")
-        },
-        fileTree("rust/sdk-core") {
-            // rust-toolchain.toml pins the compiler version, so a change to it changes the
-            // produced library and must invalidate this task.
-            include("**/*.rs", "**/Cargo.toml", "rust-toolchain.toml")
-        },
-    )
-    outputs.file("rust/target/x86_64-unknown-linux-gnu/release/lib$nativeLibName.so")
-}
-
-val copyNativeLibLinuxx8664 by tasks.registering(Copy::class) {
-    description = "Copy native library for linux-x86_64-gnu to build directory"
-    group = "build"
-    dependsOn(cargoBuildLinuxx8664)
-
-    from("rust/target/x86_64-unknown-linux-gnu/release/lib$nativeLibName.so")
-    into(nativeLibsDir.map { it.dir("native/linux-x86_64-gnu") })
-}
-
-// Native build for Linux aarch64 (runs on aarch64 Linux runner)
-val cargoBuildLinuxAarch64 by tasks.registering(Exec::class) {
-    description = "Build native library for linux-aarch64-gnu"
-    group = "build"
-    workingDir = file("rust")
-    commandLine(
-        "cargo",
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "temporalio-sdk-core-c-bridge",
-        "--target",
-        "aarch64-unknown-linux-gnu",
+// Host build, used by this build's own tests and by `nativeRuntime` consumers.
+val copyNativeLib =
+    registerNativeBuild(
+        name = "",
+        resourceDir = nativePlatform,
+        target = null,
+        libFile = "$libPrefix$nativeLibName.$libExtension",
     )
 
-    inputs.files(
-        fileTree("rust") {
-            include("Cargo.toml", "Cargo.lock")
-        },
-        fileTree("rust/sdk-core") {
-            // rust-toolchain.toml pins the compiler version, so a change to it changes the
-            // produced library and must invalidate this task.
-            include("**/*.rs", "**/Cargo.toml", "rust-toolchain.toml")
-        },
-    )
-    outputs.file("rust/target/aarch64-unknown-linux-gnu/release/lib$nativeLibName.so")
-}
-
-val copyNativeLibLinuxAarch64 by tasks.registering(Copy::class) {
-    description = "Copy native library for linux-aarch64-gnu to build directory"
-    group = "build"
-    dependsOn(cargoBuildLinuxAarch64)
-
-    from("rust/target/aarch64-unknown-linux-gnu/release/lib$nativeLibName.so")
-    into(nativeLibsDir.map { it.dir("native/linux-aarch64-gnu") })
-}
-
-// Windows x86_64 build (native MSVC on Windows runner)
-val cargoBuildWindowsx8664 by tasks.registering(Exec::class) {
-    description = "Build native library for windows-x86_64 (native MSVC)"
-    group = "build"
-    workingDir = file("rust")
-    commandLine(
-        "cargo",
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "temporalio-sdk-core-c-bridge",
-        "--target",
-        "x86_64-pc-windows-msvc",
-    )
-
-    inputs.files(
-        fileTree("rust") {
-            include("Cargo.toml", "Cargo.lock")
-        },
-        fileTree("rust/sdk-core") {
-            // rust-toolchain.toml pins the compiler version, so a change to it changes the
-            // produced library and must invalidate this task.
-            include("**/*.rs", "**/Cargo.toml", "rust-toolchain.toml")
-        },
-    )
-    outputs.file("rust/target/x86_64-pc-windows-msvc/release/$nativeLibName.dll")
-}
-
-val copyNativeLibWindowsx8664 by tasks.registering(Copy::class) {
-    description = "Copy native library for windows-x86_64 to build directory"
-    group = "build"
-    dependsOn(cargoBuildWindowsx8664)
-
-    from("rust/target/x86_64-pc-windows-msvc/release/$nativeLibName.dll")
-    into(nativeLibsDir.map { it.dir("native/windows-x86_64") })
-}
-
-// macOS aarch64 (Apple Silicon) build - native on ARM Mac runner
-val cargoBuildMacosAarch64 by tasks.registering(Exec::class) {
-    description = "Build native library for macos-aarch64 (native on ARM Mac)"
-    group = "build"
-    workingDir = file("rust")
-    commandLine(
-        "cargo",
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "temporalio-sdk-core-c-bridge",
-        "--target",
-        "aarch64-apple-darwin",
-    )
-
-    inputs.files(
-        fileTree("rust") {
-            include("Cargo.toml", "Cargo.lock")
-        },
-        fileTree("rust/sdk-core") {
-            // rust-toolchain.toml pins the compiler version, so a change to it changes the
-            // produced library and must invalidate this task.
-            include("**/*.rs", "**/Cargo.toml", "rust-toolchain.toml")
-        },
-    )
-    outputs.file("rust/target/aarch64-apple-darwin/release/lib$nativeLibName.dylib")
-}
-
-val copyNativeLibMacosAarch64 by tasks.registering(Copy::class) {
-    description = "Copy native library for macos-aarch64 to build directory"
-    group = "build"
-    dependsOn(cargoBuildMacosAarch64)
-
-    from("rust/target/aarch64-apple-darwin/release/lib$nativeLibName.dylib")
-    into(nativeLibsDir.map { it.dir("native/macos-aarch64") })
-}
-
-// Build all platforms task
-val cargoBuildAll by tasks.registering {
-    description = "Build Rust native library for all supported platforms"
-    group = "build"
-    dependsOn(
-        cargoBuildLinuxx8664,
-        cargoBuildLinuxAarch64,
-        cargoBuildWindowsx8664,
-        cargoBuildMacosAarch64,
-    )
-}
+// Cross/CI builds, one per shipped classifier.
+val copyNativeLibLinuxx8664 =
+    registerNativeBuild("Linuxx8664", "linux-x86_64-gnu", "x86_64-unknown-linux-gnu", "lib$nativeLibName.so")
+val copyNativeLibLinuxAarch64 =
+    registerNativeBuild("LinuxAarch64", "linux-aarch64-gnu", "aarch64-unknown-linux-gnu", "lib$nativeLibName.so")
+val copyNativeLibWindowsx8664 =
+    registerNativeBuild("Windowsx8664", "windows-x86_64", "x86_64-pc-windows-msvc", "$nativeLibName.dll")
+val copyNativeLibMacosAarch64 =
+    registerNativeBuild("MacosAarch64", "macos-aarch64", "aarch64-apple-darwin", "lib$nativeLibName.dylib")
 
 val copyAllNativeLibs by tasks.registering {
     description = "Copy all native libraries to build directory"
@@ -292,9 +179,6 @@ val copyWindowsNativeLib by tasks.registering {
     dependsOn(copyNativeLibWindowsx8664)
 }
 
-// Set -PskipNativeBuild=true to skip native library building (used in CI publish job)
-val skipNativeBuild = project.findProperty("skipNativeBuild")?.toString()?.toBoolean() ?: false
-
 // Create platform-specific classifier JARs containing only the native library
 nativePlatforms.forEach { platform ->
     val taskName = "${platform.classifier.replace("-", "").replace("_", "")}NativeJar"
@@ -306,41 +190,6 @@ nativePlatforms.forEach { platform ->
             into("native/${platform.resourceDir}")
         }
     }
-}
-
-// The new purpose-built bridge (rust/), built for tests while it is developed alongside the C
-// bridge. It is not shipped yet: the classifier JARs still carry the C bridge, and this task
-// exists so the new crate's ABI and completion queue can be exercised from the JVM -- which is
-// the only place the design's central claim (no upcalls, one struct, handles not pointers) can
-// actually be checked.
-val ktBridgeLib = "${libPrefix}kt_bridge.$libExtension"
-
-val cargoBuildKtBridge by tasks.registering(Exec::class) {
-    description = "Build the kt-bridge native library for the host platform"
-    group = "build"
-    workingDir = file("rust/kt-bridge")
-    commandLine("cargo", "build")
-
-    inputs.files(
-        fileTree("rust/kt-bridge") {
-            include("Cargo.toml", "Cargo.lock", "build.rs")
-            include("src/**/*.rs", "proto/**/*.proto")
-        },
-    )
-    inputs.property("targetPlatform", nativePlatform)
-    outputs.file("rust/kt-bridge/target/debug/$ktBridgeLib")
-}
-
-// Point the test JVM at the freshly built library by path. Nothing is packaged: the crate has no
-// consumers yet beyond its own tests.
-tasks.withType<Test>().configureEach {
-    dependsOn(cargoBuildKtBridge)
-    systemProperty(
-        "kt.bridge.libraryPath",
-        layout.projectDirectory
-            .file("rust/kt-bridge/target/debug/$ktBridgeLib")
-            .asFile.absolutePath,
-    )
 }
 
 // Host-platform native library, exposed to other modules in this build.
@@ -386,7 +235,7 @@ tasks.named<ProcessResources>("processTestResources") {
 tasks.register<Delete>("cargoClean") {
     description = "Clean Rust build artifacts"
     group = "build"
-    delete("rust/target")
+    delete("rust/kt-bridge/target")
 }
 
 tasks.named("clean") {

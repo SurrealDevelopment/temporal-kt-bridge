@@ -9,18 +9,24 @@ use kt_bridge::handle::{Entry, HANDLES};
 use kt_bridge::{ephemeral, proto, queue, runtime};
 
 fn cli() -> Option<String> {
-    std::env::var("TEMPORAL_CLI_PATH").ok().filter(|p| !p.is_empty())
+    std::env::var("TEMPORAL_CLI_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
-fn wait_for(
-    poller: &queue::PollerEntry,
-    timeout: Duration,
-    want: u64,
-) -> Option<KtCompletion> {
+fn wait_for(poller: &queue::PollerEntry, timeout: Duration, want: u64) -> Option<KtCompletion> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         let mut out = vec![
-            KtCompletion { req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0 };
+            KtCompletion {
+                req_id: 0,
+                kind: 0,
+                status: 0,
+                payload: 0,
+                payload_len: 0,
+                aux0: 0,
+                aux1: 0
+            };
             16
         ];
         let n = unsafe { poller.poll(out.as_mut_ptr(), 16, 250) }.expect("poll");
@@ -83,7 +89,11 @@ fn a_dev_server_starts_reports_its_pid_and_shuts_down() {
         .output()
         .expect("ps");
     eprintln!("ps -p {} exit={}", info.pid, alive.status);
-    assert!(alive.status.success(), "reported pid {} is not a live process", info.pid);
+    assert!(
+        alive.status.success(),
+        "reported pid {} is not a live process",
+        info.pid
+    );
     assert!(info.pid > 0, "pid must be reported without any fork patch");
     assert!(!info.target.is_empty(), "target must be reported");
 

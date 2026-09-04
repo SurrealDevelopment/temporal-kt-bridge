@@ -18,41 +18,25 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: 'recursive'
 
-      # Use the toolchain sdk-core pins rather than floating `stable`. The C bridge crate is
-      # almost entirely upstream code, so `-D warnings` against a newer clippy fails on lints
-      # upstream has never had to fix: `stable` was 1.98 when this was written and flagged
-      # chunks_exact_to_as_chunks in lib.rs, while the pinned 1.94 is clean. Reading the pin from
-      # the file rather than hardcoding it means bumping the submodule moves CI automatically.
-      # (rustup does not pick this file up on its own here -- it is not at the workspace root.)
+      # kt-bridge pins its own toolchain in rust-toolchain.toml. Reading the pin rather than
+      # floating `stable` keeps `-D warnings` reproducible: a newer clippy introduces lints the
+      # pinned compiler has never had to satisfy, which turns an unrelated PR red.
       - name: Read pinned Rust toolchain
         id: toolchain
         run: |
-          CHANNEL=$(grep -oP 'channel\s*=\s*"\K[^"]+' core-bridge/rust/sdk-core/rust-toolchain.toml)
+          CHANNEL=$(grep -oP 'channel\s*=\s*"\K[^"]+' core-bridge/rust/kt-bridge/rust-toolchain.toml)
           echo "Pinned toolchain: $CHANNEL"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
-          cache-workspaces: "core-bridge/rust -> target"
+          cache-workspaces: "core-bridge/rust/kt-bridge -> target"
           cache-all-crates: true
           rustflags: ""
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # --no-deps is also load-bearing: `-p` alone still lints the crate's *path* dependencies,
-      # which for a vendored workspace means all of sdk-core.
-      - name: clippy (C bridge crate)
-        working-directory: core-bridge/rust
-        run: cargo clippy --locked --no-deps -p temporalio-sdk-core-c-bridge -- -D warnings
-      - name: cargo test (C bridge crate)
-        working-directory: core-bridge/rust
-        run: cargo test --locked -p temporalio-sdk-core-c-bridge
-
-      # The replacement bridge. It is its own workspace (see core-bridge/rust/Cargo.toml) and was
-      # not built in CI at all, so nothing caught a regression in it.
       - name: clippy (kt-bridge)
         working-directory: core-bridge/rust/kt-bridge
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -114,8 +98,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: 'recursive'
 
       - name: Cache native library
         id: native-cache
@@ -124,7 +106,7 @@ jobs:
           path: ${{ matrix.artifact-path }}
           # rust-toolchain.toml is part of the key: it pins the compiler, so a change to it
           # changes the produced library.
-          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/Cargo.lock', 'core-bridge/rust/Cargo.toml', 'core-bridge/rust/sdk-core/rust-toolchain.toml', 'core-bridge/rust/sdk-core/**/*.rs', 'core-bridge/rust/sdk-core/**/Cargo.toml') }}
+          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/kt-bridge/Cargo.lock', 'core-bridge/rust/kt-bridge/rust-toolchain.toml', 'core-bridge/rust/kt-bridge/src/**') }}
 
       - uses: actions/setup-java@v4
         if: steps.native-cache.outputs.cache-hit != 'true'
@@ -214,8 +196,6 @@ jobs:
     continue-on-error: ${{ matrix.experimental }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: 'recursive'
       - uses: actions/setup-java@v4
         with:
           java-version: '25'

@@ -1,0 +1,14 @@
+# Pinned so `clippy -D warnings` is reproducible: a floating `stable` picks up new lints on an
+# unrelated PR and turns CI red for reasons the author did not cause. 1.97 is what this crate is
+# developed and released against; the shipped classifier JARs are built by this compiler.
+#
+# The cross-compiled classifiers need their targets present in the same toolchain.
+[toolchain]
+channel = "1.97"
+components = ["rustfmt", "clippy"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]

@@ -80,7 +80,11 @@ macro_rules! dispatch {
 }
 
 /// 123 RPCs on WorkflowService.
-async fn call_workflow_service(connection: &Connection, rpc: &str, bytes: &[u8]) -> KtResult<RpcOutcome> {
+async fn call_workflow_service(
+    connection: &Connection,
+    rpc: &str,
+    bytes: &[u8],
+) -> KtResult<RpcOutcome> {
     let mut client = connection.workflow_service();
     dispatch!(client, rpc, bytes, {
         "RegisterNamespace" => register_namespace(RegisterNamespaceRequest),
@@ -210,7 +214,11 @@ async fn call_workflow_service(connection: &Connection, rpc: &str, bytes: &[u8])
 }
 
 /// 11 RPCs on OperatorService.
-async fn call_operator_service(connection: &Connection, rpc: &str, bytes: &[u8]) -> KtResult<RpcOutcome> {
+async fn call_operator_service(
+    connection: &Connection,
+    rpc: &str,
+    bytes: &[u8],
+) -> KtResult<RpcOutcome> {
     let mut client = connection.operator_service();
     dispatch!(client, rpc, bytes, {
         "AddSearchAttributes" => add_search_attributes(AddSearchAttributesRequest),
@@ -227,9 +235,16 @@ async fn call_operator_service(connection: &Connection, rpc: &str, bytes: &[u8])
     })
 }
 
-/// 5 RPCs on TestService.
-async fn call_test_service(connection: &Connection, rpc: &str, bytes: &[u8]) -> KtResult<RpcOutcome> {
+/// 6 RPCs on TestService.
+async fn call_test_service(
+    connection: &Connection,
+    rpc: &str,
+    bytes: &[u8],
+) -> KtResult<RpcOutcome> {
     let mut client = connection.test_service();
+    if let Some(outcome) = call_test_service_unit(&mut client, rpc).await? {
+        return Ok(outcome);
+    }
     dispatch!(client, rpc, bytes, {
         "LockTimeSkipping" => lock_time_skipping(LockTimeSkippingRequest),
         "UnlockTimeSkipping" => unlock_time_skipping(UnlockTimeSkippingRequest),
@@ -237,6 +252,29 @@ async fn call_test_service(connection: &Connection, rpc: &str, bytes: &[u8]) -> 
         "SleepUntil" => sleep_until(SleepUntilRequest),
         "UnlockTimeSkippingWithSleep" => unlock_time_skipping_with_sleep(SleepRequest)
     })
+}
+
+/// Unit-request RPCs on TestService: nothing to decode, so they bypass `dispatch!`.
+async fn call_test_service_unit(
+    client: &mut Box<dyn temporalio_client::grpc::TestService>,
+    rpc: &str,
+) -> KtResult<Option<RpcOutcome>> {
+    let result = match rpc {
+        "GetCurrentTime" => Some(client.get_current_time(Request::new(())).await),
+        _ => None,
+    };
+    Ok(result.map(|r| match r {
+        Ok(response) => RpcOutcome {
+            payload: prost::Message::encode_to_vec(&response.into_inner()),
+            status_code: 0,
+            message: String::new(),
+        },
+        Err(status) => RpcOutcome {
+            payload: Vec::new(),
+            status_code: status.code() as i32,
+            message: status.message().to_string(),
+        },
+    }))
 }
 
 /// Dispatches one RPC by service and name.

@@ -16,17 +16,13 @@ import java.nio.file.Path
  * 3. Load the library via SymbolLookup for FFM access
  */
 object NativeLoader {
-    private const val LIB_NAME = "temporalio_sdk_core_c_bridge"
+    private const val LIB_NAME = "kt_bridge"
 
     /** System property naming an explicit library to load instead of one from the classpath. */
     private const val LIBRARY_PATH_PROPERTY = "temporal.native.libraryPath"
 
     /** Environment-variable equivalent of [LIBRARY_PATH_PROPERTY]. */
     private const val LIBRARY_PATH_ENV = "TEMPORAL_KT_NATIVE_LIB"
-
-    /** Where to find the kt-bridge library while it is not yet packaged. */
-    private const val KT_BRIDGE_PATH_PROPERTY = "kt.bridge.libraryPath"
-    private const val KT_BRIDGE_PATH_ENV = "KT_BRIDGE_LIB"
 
     /**
      * Global arena for the native library's lifetime.
@@ -38,37 +34,9 @@ object NativeLoader {
     private var symbolLookup: SymbolLookup? = null
 
     @Volatile
-    private var ktBridgeLookup: SymbolLookup? = null
-
-    @Volatile
     private var libraryPath: Path? = null
 
     private val platform: Platform by lazy { detectPlatform() }
-
-    /**
-     * Loads the kt-bridge library, the replacement for the C bridge.
-     *
-     * Separate from [load] while both exist: they are different libraries with different symbol
-     * sets, and loading one must not be mistaken for the other. This collapses into [load] when
-     * the C bridge is removed.
-     */
-    @Synchronized
-    fun loadKtBridge(): SymbolLookup {
-        ktBridgeLookup?.let { return it }
-        val override =
-            System.getProperty(KT_BRIDGE_PATH_PROPERTY)
-                ?: System.getenv(KT_BRIDGE_PATH_ENV)
-                ?: throw UnsatisfiedLinkError(
-                    "kt-bridge is not packaged yet: set -D$KT_BRIDGE_PATH_PROPERTY to a built " +
-                        "library. It ships as a classifier artifact once it replaces the C bridge.",
-                )
-        val path = Path.of(override).toAbsolutePath()
-        if (!Files.isRegularFile(path)) {
-            throw UnsatisfiedLinkError("$KT_BRIDGE_PATH_PROPERTY is set to '$override', which is not a readable file")
-        }
-        System.load(path.toString())
-        return SymbolLookup.libraryLookup(path, arena).also { ktBridgeLookup = it }
-    }
 
     /**
      * Loads an explicitly supplied library instead of one from the classpath, if configured.

@@ -24,7 +24,7 @@ version = "$protosSdkCoreVersion-${rootProject.version}"
 // anything else in this repo. Keeping them here means a change to the bridge or to `core` no
 // longer regenerates and recompiles all of them.
 //
-// The .proto sources currently come from the sdk-core submodule. When the bridge moves to its own
+// The .proto sources are vendored from the temporalio-protos crate. Since the bridge moved to its own
 // repository these are vendored into `protos/src/main/proto` instead, so that building the JVM
 // artifacts needs neither cargo nor a submodule.
 dependencies {
@@ -51,7 +51,7 @@ protobuf {
 }
 
 // The .proto sources are vendored under src/main/proto (see PINNED.toml for provenance) rather
-// than read out of the sdk-core submodule. That keeps this module buildable with neither cargo
+// than read out of a checkout of SDK-Core. That keeps this module buildable with neither cargo
 // nor a submodule checkout, keeps Gradle's build cache relocatable -- task inputs would otherwise
 // contain absolute ~/.cargo/registry paths -- and makes a proto bump a reviewable diff instead of
 // an opaque submodule pointer move.

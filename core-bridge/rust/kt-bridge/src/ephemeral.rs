@@ -22,8 +22,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use temporalio_sdk_core::ephemeral_server::{
-    EphemeralExe, EphemeralExeVersion, EphemeralServer, TemporalDevServerConfig,
-    TestServerConfig,
+    EphemeralExe, EphemeralExeVersion, EphemeralServer, TemporalDevServerConfig, TestServerConfig,
 };
 
 use crate::error::{KtError, KtResult};
@@ -80,15 +79,24 @@ fn exe(options: &crate::proto::EphemeralServerOptions) -> EphemeralExe {
     }
     let version = if options.download_version.is_empty() || options.download_version == "default" {
         EphemeralExeVersion::SDKDefault {
-            sdk_name: if options.sdk_name.is_empty() { "sdk-kotlin".into() } else { options.sdk_name.clone() },
-            sdk_version: if options.sdk_version.is_empty() { "0.1.0".into() } else { options.sdk_version.clone() },
+            sdk_name: if options.sdk_name.is_empty() {
+                "sdk-kotlin".into()
+            } else {
+                options.sdk_name.clone()
+            },
+            sdk_version: if options.sdk_version.is_empty() {
+                "0.1.0".into()
+            } else {
+                options.sdk_version.clone()
+            },
         }
     } else {
         EphemeralExeVersion::Fixed(options.download_version.clone())
     };
     EphemeralExe::CachedDownload {
         version,
-        dest_dir: (!options.download_dest_dir.is_empty()).then(|| options.download_dest_dir.clone()),
+        dest_dir: (!options.download_dest_dir.is_empty())
+            .then(|| options.download_dest_dir.clone()),
         ttl: Some(Duration::from_secs(60 * 60 * 24)),
     }
 }
@@ -108,8 +116,16 @@ pub async fn start(
     } else {
         let config = TemporalDevServerConfig::builder()
             .exe(exe(&options))
-            .namespace(if options.namespace.is_empty() { "default".to_string() } else { options.namespace.clone() })
-            .ip(if options.ip.is_empty() { "127.0.0.1".to_string() } else { options.ip.clone() })
+            .namespace(if options.namespace.is_empty() {
+                "default".to_string()
+            } else {
+                options.namespace.clone()
+            })
+            .ip(if options.ip.is_empty() {
+                "127.0.0.1".to_string()
+            } else {
+                options.ip.clone()
+            })
             .maybe_port(port(&options))
             .ui(options.ui)
             .extra_args(options.extra_args.clone())
