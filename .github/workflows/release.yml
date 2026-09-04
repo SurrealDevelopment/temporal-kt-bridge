@@ -108,14 +108,27 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Shorten cargo target dir (Windows)
-        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
-        run: echo "CARGO_TARGET_DIR=C:\t" >> $env:GITHUB_ENV
       - uses: gradle/actions/setup-gradle@v4
         if: steps.native-cache.outputs.cache-hit != 'true'
       - name: Build native library
         if: steps.native-cache.outputs.cache-hit != 'true'
         run: ./gradlew :core-bridge:${{ matrix.gradle-task }} --no-daemon
+
+      # A Copy task whose source is missing is a silent no-op in Gradle, and a cargo build that
+      # writes somewhere unexpected then yields a green job with no artifact -- which is exactly
+      # what CARGO_TARGET_DIR=C:\t did here before it was removed. Fail loudly instead.
+      - name: Verify native library was produced
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find "${{ matrix.artifact-path }}" -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) 2>/dev/null | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "ERROR: expected exactly one native library in ${{ matrix.artifact-path }}, found $count"
+            ls -laR "${{ matrix.artifact-path }}" 2>/dev/null || echo "(directory does not exist)"
+            exit 1
+          fi
+          find "${{ matrix.artifact-path }}" -type f -exec ls -la {} +
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}
