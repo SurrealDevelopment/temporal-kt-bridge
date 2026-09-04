@@ -9,7 +9,7 @@
 # cargo nor a submodule checkout, keeps the Gradle build cache relocatable (no absolute
 # ~/.cargo/registry paths in task inputs), and makes a proto bump a reviewable diff.
 crate = "temporalio-protos"
-version = "0.6.0"
+version = "0.8.0"
 
 # Only these directories are vendored, and only their *.proto files. The crate also ships
 # Makefiles, buf configs, openapi specs and .wit files that protoc never reads. google/protobuf

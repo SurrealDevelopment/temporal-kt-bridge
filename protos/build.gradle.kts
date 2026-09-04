@@ -9,11 +9,12 @@ plugins {
     alias(libs.plugins.protobuf)
 }
 
-// Versioned as `<sdkCoreVersion>-<temporal-kt version>` (e.g. 0.6.0-0.1.11): this artifact's
-// content is determined by a Temporal SDK-Core release as much as by temporal-kt, so the
-// coordinate says which Core it speaks to. See gradle.properties.
-val sdkCoreVersion: String by project
-version = "$sdkCoreVersion-${rootProject.version}"
+// Versioned as `<protosSdkCoreVersion>-<temporal-kt version>` (e.g. 0.8.0-0.1.11): this
+// artifact IS a Temporal SDK-Core release's schema, so the coordinate says which one. It uses
+// protosSdkCoreVersion rather than sdkCoreVersion because the schema can run ahead of the C
+// bridge. See gradle.properties and PINNED.toml.
+val protosSdkCoreVersion: String by project
+version = "$protosSdkCoreVersion-${rootProject.version}"
 
 // The generated protobuf classes for Temporal's API and SDK-Core's own `coresdk.*` messages.
 //
