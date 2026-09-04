@@ -233,14 +233,21 @@ jobs:
             check "core-bridge/build/libs/core-bridge-$V-$p.jar" "$p"
           done
 
+      # Credentials go through ORG_GRADLE_PROJECT_* environment variables, not -P flags. The
+      # armored PGP key is multi-line, and a multi-line value does not survive being interpolated
+      # into a shell command line -- it rendered across 109 lines and Gradle failed with
+      # "Could not evaluate spec for 'Signing is required, or signatory is set'", i.e. no
+      # signatory was parsed. Environment variables carry newlines intact, and this is the form
+      # the plugin documents.
       - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.OSSRH_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.OSSRH_TOKEN }}
         run: |
           ./gradlew publishToMavenCentral \
             -PskipNativeBuild=true \
-            -PsigningInMemoryKey="${{ secrets.SIGNING_KEY }}" \
-            -PsigningInMemoryKeyPassword="${{ secrets.SIGNING_PASSWORD }}" \
-            -PmavenCentralUsername="${{ secrets.OSSRH_USERNAME }}" \
-            -PmavenCentralPassword="${{ secrets.OSSRH_TOKEN }}" \
             --no-configuration-cache --no-daemon
 
       - name: Upload artifacts to GitHub Release
