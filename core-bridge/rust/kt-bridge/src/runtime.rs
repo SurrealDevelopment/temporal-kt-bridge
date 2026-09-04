@@ -7,8 +7,10 @@ use parking_lot::Mutex;
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions as CoreRuntimeOptions, TokioRuntimeBuilder};
 use tokio_util::sync::CancellationToken;
 
-use crate::abi::{KT_ERR_SHUTDOWN, KtKind};
+use crate::abi::{KT_ERR_CANCELLED, KT_ERR_PANIC, KT_ERR_SHUTDOWN};
 use crate::error::{KtError, KtResult};
+use futures_util::FutureExt;
+
 use crate::queue::{Pending, Queue, Sender};
 
 pub struct RuntimeEntry {
@@ -111,6 +113,126 @@ pub fn runtime_info(_entry: &RuntimeEntry) -> crate::proto::RuntimeInfo {
 /// Marks a completion as belonging to a pushed event rather than a request.
 pub const PUSHED: u64 = 0;
 
-pub fn push_kind(sender: &Sender, kind: KtKind, payload: Vec<u8>, aux0: u64) {
-    sender.push(Pending::ack(PUSHED).kind(kind).payload(payload).aux0(aux0));
+/// Runs an async operation so that it produces exactly one terminal completion.
+///
+/// This is where the invariant in [`crate::queue`] is actually enforced, rather than merely
+/// intended. Whatever `op` does -- succeed, fail, panic, or lose a race with cancellation or
+/// shutdown -- the caller's `req_id` is answered once and only once:
+///
+///   * the operation races its own cancellation token, so `kt_cancel` produces `KT_ERR_CANCELLED`
+///     rather than leaving the JVM waiting;
+///   * `retire` is the single point of truth, so whichever of completion and cancellation arrives
+///     second sends nothing;
+///   * a panic inside `op` is caught here, because a panicking Tokio task would otherwise be
+///     swallowed by the JoinSet and the request would hang forever;
+///   * on shutdown, anything still registered is drained with `KT_ERR_SHUTDOWN`.
+pub fn spawn_request<F>(entry: &Arc<RuntimeEntry>, req_id: u64, op: F)
+where
+    F: std::future::Future<Output = Pending> + Send + 'static,
+{
+    let token = entry.register(req_id);
+    let sender = entry.sender();
+    let owner = entry.clone();
+    entry.core.tokio_handle().spawn(async move {
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => Pending::error(req_id, KT_ERR_CANCELLED, "cancelled"),
+            outcome = std::panic::AssertUnwindSafe(op).catch_unwind() => match outcome {
+                Ok(pending) => pending,
+                Err(payload) => Pending::error(
+                    req_id,
+                    KT_ERR_PANIC,
+                    format!("panic: {}", crate::panic::panic_message(&payload)),
+                ),
+            },
+        };
+        // Only the first of completion / cancellation / shutdown gets to answer.
+        if owner.retire(req_id) {
+            sender.push(result);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi::{KT_ERR_CANCELLED, KT_ERR_PANIC, KT_OK};
+
+    fn runtime() -> Arc<RuntimeEntry> {
+        new_runtime(crate::proto::RuntimeOptions::default()).expect("runtime")
+    }
+
+    fn drain(entry: &RuntimeEntry, poller: &crate::queue::PollerEntry) -> Vec<(u64, i32)> {
+        let mut out = vec![
+            crate::abi::KtCompletion {
+                req_id: 0, kind: 0, status: 0, payload: 0, payload_len: 0, aux0: 0, aux1: 0,
+            };
+            16
+        ];
+        let _ = entry;
+        let n = unsafe { poller.poll(out.as_mut_ptr(), 16, 500) }.unwrap();
+        out[..n as usize].iter().map(|r| (r.req_id, r.status)).collect()
+    }
+
+    #[test]
+    fn a_successful_request_yields_exactly_one_completion() {
+        let entry = runtime();
+        let poller = entry.queue.poller();
+        spawn_request(&entry, 1, async { Pending::ack(1) });
+        assert_eq!(drain(&entry, &poller), vec![(1, KT_OK)]);
+        // Nothing further, and the pending table is empty again.
+        assert_eq!(drain(&entry, &poller), vec![]);
+        assert!(!entry.retire(1), "the request must already be retired");
+    }
+
+    #[test]
+    fn a_panicking_request_answers_rather_than_hanging() {
+        // A panicking Tokio task is otherwise swallowed by the JoinSet and the JVM waits forever.
+        let entry = runtime();
+        let poller = entry.queue.poller();
+        spawn_request(&entry, 2, async { panic!("boom") });
+        assert_eq!(drain(&entry, &poller), vec![(2, KT_ERR_PANIC)]);
+    }
+
+    #[test]
+    fn cancelling_answers_once_and_the_late_result_is_dropped() {
+        let entry = runtime();
+        let poller = entry.queue.poller();
+        spawn_request(&entry, 3, async {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            Pending::ack(3)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        entry.cancel(3);
+        assert_eq!(drain(&entry, &poller), vec![(3, KT_ERR_CANCELLED)]);
+        // The operation's own result must not arrive afterwards.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(drain(&entry, &poller), vec![], "a cancelled request must answer exactly once");
+    }
+
+    #[test]
+    fn shutdown_answers_everything_still_outstanding() {
+        // This is what removes the JVM's 60-second "await pending callbacks" latch: no
+        // continuation is left waiting for a completion that will never come.
+        let entry = runtime();
+        let poller = entry.queue.poller();
+        for req_id in 10..14 {
+            spawn_request(&entry, req_id, async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Pending::ack(req_id)
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        free_runtime(entry.clone());
+
+        let mut answered: Vec<u64> = drain(&entry, &poller).into_iter().map(|(id, _)| id).collect();
+        answered.sort_unstable();
+        assert_eq!(answered, vec![10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn cancelling_an_unknown_request_is_harmless() {
+        let entry = runtime();
+        entry.cancel(9_999);
+    }
 }

@@ -41,3 +41,13 @@ message LogRecord {
   string message = 2;
   string fields_json = 3;
 }
+
+message ClientOptions {
+  string target_url = 1;
+  string namespace = 2;
+  string identity = 3;
+  string client_name = 4;
+  string client_version = 5;
+  string api_key = 6;
+  uint64 connect_timeout_millis = 7;
+}

@@ -30,6 +30,7 @@ pub mod proto {
 use std::ptr;
 
 use abi::*;
+
 use error::{KtError, KtResult};
 use handle::{Entry, HANDLES};
 
@@ -135,6 +136,43 @@ kt_export! {
             }
             _ => Err(KtError::WrongHandleKind),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------------------------
+
+kt_export! {
+    /// Connects a client. Returns immediately; the result arrives as a completion for `req_id`
+    /// with `kind = ClientConnected` and the handle in `aux0`, or a non-zero status and the error
+    /// text as the payload.
+    fn kt_client_connect(runtime: u64, cfg: *const u8, cfg_len: u32, req_id: u64) {
+        if req_id == 0 {
+            return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
+        }
+        let entry = HANDLES.runtime(runtime)?;
+        let config: proto::ClientOptions = prost::Message::decode(unsafe { slice(cfg, cfg_len) })?;
+        let options = client::connection_options(&config)?;
+        let namespace = config.namespace.clone();
+
+        runtime::spawn_request(&entry, req_id, async move {
+            match client::connect(options, namespace).await {
+                Ok(client) => {
+                    let handle = HANDLES.insert(Entry::Client(client));
+                    queue::Pending::ack(req_id).kind(KtKind::ClientConnected).aux0(handle)
+                }
+                Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
+            }
+        });
+        Ok(())
+    }
+}
+
+kt_export! {
+    fn kt_client_free(client: u64) {
+        HANDLES.remove_of_kind(client, handle::KIND_CLIENT)?;
+        Ok(())
     }
 }
 
