@@ -18,6 +18,12 @@ import java.nio.file.Path
 object NativeLoader {
     private const val LIB_NAME = "temporalio_sdk_core_c_bridge"
 
+    /** System property naming an explicit library to load instead of one from the classpath. */
+    private const val LIBRARY_PATH_PROPERTY = "temporal.native.libraryPath"
+
+    /** Environment-variable equivalent of [LIBRARY_PATH_PROPERTY]. */
+    private const val LIBRARY_PATH_ENV = "TEMPORAL_KT_NATIVE_LIB"
+
     /**
      * Global arena for the native library's lifetime.
      * Using global arena ensures the library stays loaded for the JVM's lifetime.
@@ -33,6 +39,38 @@ object NativeLoader {
     private val platform: Platform by lazy { detectPlatform() }
 
     /**
+     * Loads an explicitly supplied library instead of one from the classpath, if configured.
+     *
+     * Set `-Dtemporal.native.libraryPath=/abs/path/lib...` (or the `TEMPORAL_KT_NATIVE_LIB`
+     * environment variable) to run against a locally built library. This is how you test a Rust
+     * change without packaging a JAR, and it is required when consuming this project as a Gradle
+     * composite build, because classifier dependencies cannot be substituted that way.
+     *
+     * Unlike the classpath path, nothing is extracted: the file is loaded where it sits.
+     *
+     * @throws UnsatisfiedLinkError if a path is configured but does not point at a readable file,
+     *   since silently falling back to the classpath would hide the very change being tested.
+     */
+    private fun loadFromOverride(): SymbolLookup? {
+        val configured =
+            System.getProperty(LIBRARY_PATH_PROPERTY)
+                ?: System.getenv(LIBRARY_PATH_ENV)
+                ?: return null
+
+        val path = Path.of(configured).toAbsolutePath()
+        if (!Files.isRegularFile(path)) {
+            throw UnsatisfiedLinkError(
+                "$LIBRARY_PATH_PROPERTY is set to '$configured', which is not a readable file. " +
+                    "Point it at a built library, or unset it to use the one on the classpath.",
+            )
+        }
+
+        System.load(path.toString())
+        libraryPath = path
+        return SymbolLookup.libraryLookup(path, arena).also { symbolLookup = it }
+    }
+
+    /**
      * Loads the native library and returns a SymbolLookup for accessing symbols.
      * Safe to call multiple times - returns cached lookup after first load.
      *
@@ -43,6 +81,8 @@ object NativeLoader {
     @Synchronized
     fun load(): SymbolLookup {
         symbolLookup?.let { return it }
+
+        loadFromOverride()?.let { return it }
 
         val libFileName = platform.libFileName(LIB_NAME)
         val resourcePath = "/native/${platform.resourceDir}/$libFileName"

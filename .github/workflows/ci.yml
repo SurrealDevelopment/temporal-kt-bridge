@@ -28,10 +28,12 @@ jobs:
           cache-all-crates: true
           rustflags: ""
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      # Only our own bridge sources are linted; sdk-core is vendored upstream code.
+      # --no-deps is load-bearing: `-p` still lints the crate's path dependencies, so without it
+      # a newer clippy than upstream pinned fails the build on vendored sdk-core code we do not
+      # own. We lint only the C bridge crate, which is where our carried patches live.
       - name: clippy (C bridge crate)
         working-directory: core-bridge/rust
-        run: cargo clippy --locked -p temporalio-sdk-core-c-bridge -- -D warnings
+        run: cargo clippy --locked --no-deps -p temporalio-sdk-core-c-bridge -- -D warnings
       - name: cargo test (C bridge crate)
         working-directory: core-bridge/rust
         run: cargo test --locked -p temporalio-sdk-core-c-bridge
