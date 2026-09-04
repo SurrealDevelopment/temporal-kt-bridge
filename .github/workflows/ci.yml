@@ -20,17 +20,30 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: 'recursive'
+
+      # Use the toolchain sdk-core pins rather than floating `stable`. The C bridge crate is
+      # almost entirely upstream code, so `-D warnings` against a newer clippy fails on lints
+      # upstream has never had to fix: `stable` was 1.98 when this was written and flagged
+      # chunks_exact_to_as_chunks in lib.rs, while the pinned 1.94 is clean. Reading the pin from
+      # the file rather than hardcoding it means bumping the submodule moves CI automatically.
+      # (rustup does not pick this file up on its own here -- it is not at the workspace root.)
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep -oP 'channel\s*=\s*"\K[^"]+' core-bridge/rust/sdk-core/rust-toolchain.toml)
+          echo "Pinned toolchain: $CHANNEL"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
           cache-workspaces: "core-bridge/rust -> target"
           cache-all-crates: true
           rustflags: ""
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      # --no-deps is load-bearing: `-p` still lints the crate's path dependencies, so without it
-      # a newer clippy than upstream pinned fails the build on vendored sdk-core code we do not
-      # own. We lint only the C bridge crate, which is where our carried patches live.
+
+      # --no-deps is also load-bearing: `-p` alone still lints the crate's *path* dependencies,
+      # which for a vendored workspace means all of sdk-core.
       - name: clippy (C bridge crate)
         working-directory: core-bridge/rust
         run: cargo clippy --locked --no-deps -p temporalio-sdk-core-c-bridge -- -D warnings
