@@ -81,8 +81,16 @@ macro_rules! kt_export {
         fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $body:block
     ) => {
         $(#[$meta])*
+        ///
+        /// # Safety
+        /// Every pointer argument must either be null or point to memory valid for the stated
+        /// length for the duration of the call. `out`-style pointers must additionally be
+        /// writable and correctly aligned for their type. The callee never retains a pointer past
+        /// the call, so the caller may free or reuse the memory as soon as it returns.
         #[unsafe(no_mangle)]
-        pub extern "C" fn $name($($arg: $ty),*) -> i32 {
+        // `unsafe` because these dereference caller-provided raw pointers; the exported symbol
+        // and the C ABI are unchanged, so the JVM side is unaffected.
+        pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
             $crate::panic::guard(move || -> ::std::result::Result<(), $crate::error::KtError> {
                 $body
             })

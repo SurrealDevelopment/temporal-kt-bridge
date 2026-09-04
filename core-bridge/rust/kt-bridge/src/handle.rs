@@ -29,6 +29,12 @@ pub struct Table {
     free: Vec<u32>,
 }
 
+impl Default for HandleTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct HandleTable {
     inner: RwLock<Table>,
 }

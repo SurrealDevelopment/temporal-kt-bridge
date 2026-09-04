@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use temporalio_sdk_core::Worker as CoreWorker;
-use temporalio_sdk_core::PollError;
-use tokio::task::JoinSet;
+use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_sdk_core::{PollError, WorkerVersioningStrategy};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::{KT_ERR_FAILED, KtKind};
 use crate::error::{KtError, KtResult};
@@ -31,21 +32,29 @@ use crate::queue::{Pending, Sender};
 /// `finalize_shutdown` unwrapped `None` and aborted the JVM. Here `Finalized` simply has no field
 /// to unwrap, so the mistake is not expressible.
 pub enum WorkerState {
-    Running {
-        core: Arc<CoreWorker>,
-        pumps: JoinSet<()>,
-    },
-    Draining {
-        core: Arc<CoreWorker>,
-    },
+    Running { core: Arc<CoreWorker>, started: bool },
+    Draining { core: Arc<CoreWorker> },
     Finalized,
 }
 
 pub struct WorkerEntry {
     pub state: Mutex<WorkerState>,
     pub sender: Sender,
-    /// This worker's own handle, so pushed task completions can say which worker they came from.
-    pub handle: Mutex<u64>,
+    /// How many poll loops are still running.
+    ///
+    /// Shutdown must not finalize until every pump has seen `PollError::ShutDown`, because Core's
+    /// own shutdown does not complete until lang has polled each stream to the end.
+    pub live_pumps: Arc<AtomicUsize>,
+}
+
+impl WorkerEntry {
+    pub fn new(core: Arc<CoreWorker>, sender: Sender) -> Self {
+        Self {
+            state: Mutex::new(WorkerState::Running { core, started: false }),
+            sender,
+            live_pumps: Arc::new(AtomicUsize::new(3)),
+        }
+    }
 }
 
 impl WorkerEntry {
@@ -60,10 +69,11 @@ impl WorkerEntry {
 
 /// Which stream a pushed task came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
 pub enum TaskKind {
-    WorkflowActivation,
-    Activity,
-    Nexus,
+    WorkflowActivation = 0,
+    Activity = 1,
+    Nexus = 2,
 }
 
 impl TaskKind {
@@ -86,7 +96,18 @@ async fn pump(
     kind: TaskKind,
     sender: Sender,
     worker_handle: u64,
+    live: Arc<AtomicUsize>,
 ) {
+    // Decrement on every exit path, including an unwind, so shutdown cannot wait forever on a
+    // pump that has already gone.
+    struct Leaving(Arc<AtomicUsize>);
+    impl Drop for Leaving {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    let _leaving = Leaving(live);
+
     loop {
         let polled = match kind {
             TaskKind::WorkflowActivation => core
@@ -108,7 +129,8 @@ async fn pump(
                 Pending::ack(crate::runtime::PUSHED)
                     .kind(kind.completion_kind())
                     .payload(bytes)
-                    .aux0(worker_handle),
+                    .aux0(worker_handle)
+                    .aux1(kind as u64),
             ),
             Err(PollError::ShutDown) => {
                 // Tell Kotlin the stream is finished so it can close its channel, rather than
@@ -116,15 +138,26 @@ async fn pump(
                 sender.push(
                     Pending::ack(crate::runtime::PUSHED)
                         .kind(KtKind::TaskStreamEnd)
-                        .aux0(worker_handle),
+                        .aux0(worker_handle)
+                        .aux1(kind as u64),
                 );
                 return;
             }
             Err(err) => {
+                // aux1 carries the stream kind: without it Kotlin knows a stream died but not
+                // which of its three channels to close.
                 sender.push(
                     Pending::error(crate::runtime::PUSHED, KT_ERR_FAILED, err.to_string())
                         .kind(KtKind::WorkerFailed)
-                        .aux0(worker_handle),
+                        .aux0(worker_handle)
+                        .aux1(kind as u64),
+                );
+                // Still end the stream, so the consumer closes rather than waiting forever.
+                sender.push(
+                    Pending::ack(crate::runtime::PUSHED)
+                        .kind(KtKind::TaskStreamEnd)
+                        .aux0(worker_handle)
+                        .aux1(kind as u64),
                 );
                 return;
             }
@@ -133,12 +166,23 @@ async fn pump(
 }
 
 /// Spawns the three poll loops.
-pub fn start(entry: &Arc<WorkerEntry>, worker_handle: u64) -> KtResult {
+///
+/// Two things here are load-bearing and were wrong in the first draft:
+///
+///   * `JoinSet::spawn` calls `tokio::spawn`, which panics with "there is no reactor running"
+///     unless a runtime is entered. This runs on the JVM's calling thread, so the handle must be
+///     entered explicitly.
+///   * The pumps are *detached*, not held in a `JoinSet` owned by the state. A `JoinSet` aborts
+///     its tasks on drop, so replacing `Running` with `Draining` would have killed all three
+///     mid-`poll_*` -- precisely the "lang stopped polling before PollError::ShutDown" violation
+///     this module exists to make impossible. Each pump instead owns an `Arc<CoreWorker>` and
+///     runs to `ShutDown` on its own; `finalize` waits for them via the completion counter.
+pub fn start(entry: &Arc<WorkerEntry>, runtime: &Arc<crate::runtime::RuntimeEntry>, worker_handle: u64) -> KtResult {
     let mut guard = entry.state.lock();
-    let core = match &mut *guard {
-        WorkerState::Running { core, pumps } => {
-            if !pumps.is_empty() {
-                return Ok(()); // already started; starting twice is a no-op, not an error
+    let core = match &*guard {
+        WorkerState::Running { core, started } => {
+            if *started {
+                return Ok(()); // idempotent
             }
             core.clone()
         }
@@ -146,11 +190,138 @@ pub fn start(entry: &Arc<WorkerEntry>, worker_handle: u64) -> KtResult {
             return Err(KtError::WorkerShutDown);
         }
     };
-
-    if let WorkerState::Running { pumps, .. } = &mut *guard {
-        for kind in [TaskKind::WorkflowActivation, TaskKind::Activity, TaskKind::Nexus] {
-            pumps.spawn(pump(core.clone(), kind, entry.sender.clone(), worker_handle));
-        }
+    if let WorkerState::Running { started, .. } = &mut *guard {
+        *started = true;
     }
+    drop(guard);
+
+    let _entered = runtime.core.tokio_handle().enter();
+    for kind in [TaskKind::WorkflowActivation, TaskKind::Activity, TaskKind::Nexus] {
+        tokio::spawn(pump(
+            core.clone(),
+            kind,
+            entry.sender.clone(),
+            worker_handle,
+            entry.live_pumps.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Builds Core's worker config from the protobuf options.
+pub fn worker_config(
+    options: &crate::proto::WorkerOptions,
+) -> KtResult<temporalio_sdk_core::WorkerConfig> {
+    if options.namespace.is_empty() {
+        return Err(KtError::InvalidArgument("namespace is empty".into()));
+    }
+    if options.task_queue.is_empty() {
+        return Err(KtError::InvalidArgument("task_queue is empty".into()));
+    }
+    // `task_types` has no default and Core rejects an empty set, so it must be stated. The
+    // builder is typestate-based, so options cannot be applied by conditional reassignment --
+    // hence `maybe_*` and one chained expression.
+    let task_types = WorkerTaskTypes {
+        enable_workflows: true,
+        enable_local_activities: true,
+        enable_remote_activities: !options.no_remote_activities,
+        enable_nexus: false,
+    };
+
+    temporalio_sdk_core::WorkerConfig::builder()
+        .namespace(options.namespace.clone())
+        .task_queue(options.task_queue.clone())
+        .max_cached_workflows(options.max_cached_workflows as usize)
+        .task_types(task_types)
+        // Required with no default. Versioning is a distinct feature with its own JVM surface;
+        // until that is wired through, workers are explicitly unversioned rather than implicitly
+        // defaulted, so a versioning bug cannot hide behind a silent default.
+        .versioning_strategy(WorkerVersioningStrategy::None {
+            build_id: options.build_id.clone(),
+        })
+        .maybe_client_identity_override(
+            (!options.identity.is_empty()).then(|| options.identity.clone()),
+        )
+        .build()
+        .map_err(|e| KtError::InvalidArgument(format!("invalid worker config: {e}")))
+}
+
+/// Shuts the worker down without ever leaving Core's poll contract unsatisfied.
+///
+/// Order matters and is the area with the highest historical defect density in this bridge:
+///
+///   1. `initiate_shutdown` tells Core to stop handing out work.
+///   2. Wait for all three pumps to observe `PollError::ShutDown` and exit. Core's own shutdown
+///      does not complete until every stream has been polled to the end, so finalizing before
+///      this point is what used to hang `awaitShutdown` forever.
+///   3. Move to `Finalized` -- which structurally has no worker to reach for -- and drop the last
+///      reference so Core can finish.
+///
+/// `grace` bounds step 2. Exceeding it is reported rather than hidden, because silently
+/// finalizing early is how a stranded activity completion goes unnoticed.
+pub async fn shutdown(entry: Arc<WorkerEntry>, grace: std::time::Duration) -> Result<(), String> {
+    let core = {
+        let mut guard = entry.state.lock();
+        match std::mem::replace(&mut *guard, WorkerState::Finalized) {
+            WorkerState::Running { core, .. } | WorkerState::Draining { core } => {
+                *guard = WorkerState::Draining { core: core.clone() };
+                core
+            }
+            WorkerState::Finalized => return Ok(()), // idempotent
+        }
+    };
+
+    core.initiate_shutdown();
+
+    let deadline = std::time::Instant::now() + grace;
+    let mut timed_out = false;
+    while entry.live_pumps.load(Ordering::Acquire) > 0 {
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    *entry.state.lock() = WorkerState::Finalized;
+
+    match Arc::try_unwrap(core) {
+        Ok(worker) => {
+            worker.finalize_shutdown().await;
+            if timed_out {
+                Err("shut down before every poll stream reported ShutDown".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        // Returned, never panicked: the C bridge's equivalent unwrapped and aborted the JVM.
+        Err(_) => Err("worker still referenced elsewhere; not finalized".to_string()),
+    }
+}
+
+/// Completes a task of the given kind from its encoded protobuf.
+pub async fn complete(core: &Arc<CoreWorker>, task_kind: u32, bytes: &[u8]) -> Result<(), String> {
+    match task_kind {
+        0 => {
+            let completion = prost::Message::decode(bytes).map_err(|e| e.to_string())?;
+            core.complete_workflow_activation(completion).await.map_err(|e| e.to_string())
+        }
+        1 => {
+            let completion = prost::Message::decode(bytes).map_err(|e| e.to_string())?;
+            core.complete_activity_task(completion).await.map_err(|e| e.to_string())
+        }
+        2 => {
+            let completion = prost::Message::decode(bytes).map_err(|e| e.to_string())?;
+            core.complete_nexus_task(completion).await.map_err(|e| e.to_string())
+        }
+        other => Err(format!("unknown task kind {other}")),
+    }
+}
+
+/// Records an activity heartbeat.
+pub fn heartbeat(core: &Arc<CoreWorker>, bytes: &[u8]) -> KtResult {
+    let heartbeat: temporalio_common::protos::coresdk::ActivityHeartbeat =
+        prost::Message::decode(bytes)?;
+    core.record_activity_heartbeat(heartbeat);
     Ok(())
 }

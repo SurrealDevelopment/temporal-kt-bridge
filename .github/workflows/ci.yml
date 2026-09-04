@@ -51,6 +51,35 @@ jobs:
         working-directory: core-bridge/rust
         run: cargo test --locked -p temporalio-sdk-core-c-bridge
 
+      # The replacement bridge. It is its own workspace (see core-bridge/rust/Cargo.toml) and was
+      # not built in CI at all, so nothing caught a regression in it.
+      - name: clippy (kt-bridge)
+        working-directory: core-bridge/rust/kt-bridge
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test (kt-bridge)
+        working-directory: core-bridge/rust/kt-bridge
+        run: cargo test --locked
+
+      # Enforces what panic.rs claims: no entry point may bypass the kt_export! macro, which is
+      # the only thing keeping a panic from aborting the host JVM. kt_abi_probe and kt_last_error
+      # are the two documented exemptions; both are infallible by construction.
+      - name: every FFI entry point is panic-contained
+        working-directory: core-bridge/rust/kt-bridge
+        run: |
+          set -euo pipefail
+          bare=$(grep -rn 'extern "C"' src/ \
+                  | grep -v 'macro_rules' \
+                  | grep -v 'kt_abi_probe' \
+                  | grep -v 'kt_last_error' \
+                  | grep -v '^src/panic.rs' || true)
+          if [ -n "$bare" ]; then
+            echo "ERROR: extern \"C\" outside kt_export! (a panic here aborts the JVM):"
+            echo "$bare"
+            exit 1
+          fi
+          echo "OK: all entry points go through kt_export!"
+
   hygiene:
     name: Repository hygiene
     runs-on: ubuntu-latest

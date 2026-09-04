@@ -104,7 +104,7 @@ pub fn abi_probe_values() -> [u32; 12] {
         core::mem::offset_of!(KtCompletion, payload_len) as u32,
         core::mem::offset_of!(KtCompletion, aux0) as u32,
         core::mem::offset_of!(KtCompletion, aux1) as u32,
-        (size_of::<usize>() * 8) as u32,
+        usize::BITS,
         KtKind::COUNT,
     ]
 }

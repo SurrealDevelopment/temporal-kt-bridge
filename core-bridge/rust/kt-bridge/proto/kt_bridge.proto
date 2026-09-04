@@ -51,3 +51,22 @@ message ClientOptions {
   string api_key = 6;
   uint64 connect_timeout_millis = 7;
 }
+
+message WorkerOptions {
+  string namespace = 1;
+  string task_queue = 2;
+  string identity = 3;
+  uint32 max_cached_workflows = 4;
+  // 0 means "let Core choose".
+  uint32 max_concurrent_workflow_tasks = 5;
+  uint32 max_concurrent_activities = 6;
+  uint32 max_concurrent_local_activities = 7;
+  bool no_remote_activities = 8;
+  // Optional identifier; versioning itself is not wired through yet.
+  string build_id = 9;
+}
+
+// How long shutdown waits for in-flight tasks before finalizing anyway.
+message WorkerShutdownOptions {
+  uint64 grace_millis = 1;
+}
