@@ -310,13 +310,11 @@ nativePlatforms.forEach { platform ->
 
 // Host-platform native library, exposed to other modules in this build.
 //
-// Consumers declare `testRuntimeOnly(project(path = ":core-bridge", configuration = "nativeRuntime"))`
-// (see the `temporal-native-test` convention plugin) so the native arrives as a single JAR on the
-// classpath -- the same shape it has when resolved from Maven as a classifier artifact. This
-// deliberately replaces the old arrangement, where every module in the build added
-// `core-bridge/build/native-libs` as a resources srcDir and made its own `processTestResources`
-// depend on `:core-bridge:copyNativeLib`. That fan-out put a full Rust build behind modules that
-// never touch native code, and copied the ~37 MB library into each module's build/resources tree.
+// A consumer in this build declares
+// `testRuntimeOnly(project(path = ":core-bridge", configuration = "nativeRuntime"))` to get the
+// native as a single JAR on the classpath -- the same shape it has when resolved from Maven as a
+// classifier artifact, so local development and downstream exercise one path. temporal-kt uses
+// exactly this via its `temporal-native-test` convention plugin, against the published artifact.
 //
 // When -PskipNativeBuild=true the JAR is packaged from whatever is already in build/native-libs
 // (CI downloads prebuilt libraries there), so cargo is not invoked.

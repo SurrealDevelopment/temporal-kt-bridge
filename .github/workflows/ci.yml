@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust-checks:
+    name: Rust checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          cache-workspaces: "core-bridge/rust -> target"
+          cache-all-crates: true
+          rustflags: ""
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Only our own bridge sources are linted; sdk-core is vendored upstream code.
+      - name: clippy (C bridge crate)
+        working-directory: core-bridge/rust
+        run: cargo clippy --locked -p temporalio-sdk-core-c-bridge -- -D warnings
+      - name: cargo test (C bridge crate)
+        working-directory: core-bridge/rust
+        run: cargo test --locked -p temporalio-sdk-core-c-bridge
+
+  build-native:
+    name: Build native (${{ matrix.platform }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            gradle-task: copyNativeLibLinuxx8664
+            artifact-name: native-libs-linux-x86_64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64-gnu
+            rust-targets: aarch64-unknown-linux-gnu
+            gradle-task: copyNativeLibLinuxAarch64
+            artifact-name: native-libs-linux-aarch64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
+          - os: macos-14
+            platform: macos-aarch64
+            rust-targets: aarch64-apple-darwin
+            gradle-task: copyMacosAarch64NativeLib
+            artifact-name: native-libs-macos-aarch64
+            artifact-path: core-bridge/build/native-libs/native/macos-aarch64
+          - os: windows-latest
+            platform: windows-x86_64
+            rust-targets: x86_64-pc-windows-msvc
+            gradle-task: copyWindowsNativeLib
+            artifact-name: native-libs-windows
+            artifact-path: core-bridge/build/native-libs/native/windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+
+      - name: Cache native library
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.artifact-path }}
+          # rust-toolchain.toml is part of the key: it pins the compiler, so a change to it
+          # changes the produced library.
+          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/Cargo.lock', 'core-bridge/rust/Cargo.toml', 'core-bridge/rust/sdk-core/rust-toolchain.toml', 'core-bridge/rust/sdk-core/**/*.rs', 'core-bridge/rust/sdk-core/**/Cargo.toml') }}
+
+      - uses: actions/setup-java@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          toolchain: stable
+          target: ${{ matrix.rust-targets }}
+          cache-workspaces: "core-bridge/rust -> target"
+          cache-all-crates: true
+          cache-on-failure: true
+          rustflags: ""
+      - name: Install protobuf (Linux)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf (macOS)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protobuf (Windows)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Deep target/ paths blow past MAX_PATH on Windows runners.
+      - name: Shorten cargo target dir (Windows)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        run: echo "CARGO_TARGET_DIR=C:\t" >> $env:GITHUB_ENV
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
+      - name: Build native library
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: ./gradlew :core-bridge:${{ matrix.gradle-task }} --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+          retention-days: 1
+
+  jvm-test:
+    name: JVM test (${{ matrix.platform }})
+    needs: [build-native]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64-gnu
+            artifact-name: native-libs-linux-x86_64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
+            experimental: false
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64-gnu
+            artifact-name: native-libs-linux-aarch64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
+            experimental: false
+          - os: macos-14
+            platform: macos-aarch64
+            artifact-name: native-libs-macos-aarch64
+            artifact-path: core-bridge/build/native-libs/native/macos-aarch64
+            experimental: false
+          # Windows was disabled in temporal-kt because the 30-minute cargo build made it
+          # unreliable. That cost is gone here (the native is a downloaded artifact), so it runs
+          # again -- non-blocking until it has a track record.
+          - os: windows-latest
+            platform: windows-x86_64
+            artifact-name: native-libs-windows
+            artifact-path: core-bridge/build/native-libs/native/windows-x86_64
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+      - name: Install protobuf (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protobuf (Windows)
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+      - name: Build and test
+        run: ./gradlew build -PskipNativeBuild=true --no-daemon
+      # A crash in a native call kills the JVM and Gradle reports nothing useful, so keep the
+      # forensics.
+      - name: Upload crash logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-logs-${{ matrix.platform }}
+          path: |
+            **/hs_err_pid*.log
+            **/replay_pid*.log
+          if-no-files-found: ignore

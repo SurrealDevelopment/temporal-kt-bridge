@@ -1,0 +1,216 @@
+name: Release to Maven Central
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (leave empty to use gradle.properties version)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  build-native:
+    name: Build native (${{ matrix.platform }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            gradle-task: copyNativeLibLinuxx8664
+            artifact-name: native-libs-linux-x86_64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64-gnu
+            rust-targets: aarch64-unknown-linux-gnu
+            gradle-task: copyNativeLibLinuxAarch64
+            artifact-name: native-libs-linux-aarch64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
+          - os: macos-14
+            platform: macos-aarch64
+            rust-targets: aarch64-apple-darwin
+            gradle-task: copyMacosAarch64NativeLib
+            artifact-name: native-libs-macos-aarch64
+            artifact-path: core-bridge/build/native-libs/native/macos-aarch64
+          - os: windows-latest
+            platform: windows-x86_64
+            rust-targets: x86_64-pc-windows-msvc
+            gradle-task: copyWindowsNativeLib
+            artifact-name: native-libs-windows
+            artifact-path: core-bridge/build/native-libs/native/windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+      - name: Cache native library
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.artifact-path }}
+          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/Cargo.lock', 'core-bridge/rust/Cargo.toml', 'core-bridge/rust/sdk-core/rust-toolchain.toml', 'core-bridge/rust/sdk-core/**/*.rs', 'core-bridge/rust/sdk-core/**/Cargo.toml') }}
+      - uses: actions/setup-java@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          toolchain: stable
+          target: ${{ matrix.rust-targets }}
+          cache-workspaces: "core-bridge/rust -> target"
+          cache-all-crates: true
+          cache-on-failure: true
+          rustflags: ""
+      - name: Install protobuf (Linux)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf (macOS)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protobuf (Windows)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Shorten cargo target dir (Windows)
+        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        run: echo "CARGO_TARGET_DIR=C:\t" >> $env:GITHUB_ENV
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
+      - name: Build native library
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: ./gradlew :core-bridge:${{ matrix.gradle-task }} --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+          retention-days: 1
+
+  publish:
+    name: Publish to Maven Central
+    needs: [build-native]
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # release asset uploads
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download native libs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-libs-*
+          path: /tmp/natives
+      - name: Place native libs
+        run: |
+          set -euo pipefail
+          declare -A MAP=(
+            [native-libs-linux-x86_64-gnu]=linux-x86_64-gnu
+            [native-libs-linux-aarch64-gnu]=linux-aarch64-gnu
+            [native-libs-macos-aarch64]=macos-aarch64
+            [native-libs-windows]=windows-x86_64
+          )
+          for name in "${!MAP[@]}"; do
+            dest="core-bridge/build/native-libs/native/${MAP[$name]}"
+            mkdir -p "$dest"
+            cp -v /tmp/natives/"$name"/* "$dest"/
+          done
+          find core-bridge/build/native-libs -type f | sort
+
+      # Anchored so it cannot start matching sdkCoreVersion= or any future *version= property.
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "Publishing version: $VERSION"
+          sed -i "s/^version=.*/version=$VERSION/" gradle.properties
+      - name: Set version from input
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        run: sed -i "s/^version=.*/version=${{ inputs.version }}/" gradle.properties
+
+      - name: Build JARs
+        run: |
+          ./gradlew jar \
+            :core-bridge:linuxx8664gnuNativeJar \
+            :core-bridge:linuxaarch64gnuNativeJar \
+            :core-bridge:macosaarch64NativeJar \
+            :core-bridge:windowsx8664NativeJar \
+            -PskipNativeBuild=true --no-daemon
+
+      - name: Verify JAR contents
+        run: |
+          set -euo pipefail
+
+          # The main JAR must never carry natives -- consumers pick a classifier.
+          MAIN_JAR=$(ls core-bridge/build/libs/core-bridge-*.jar \
+            | grep -Ev -- '-(linux|macos|windows)|-sources|-javadoc|-native-host' | head -1)
+          echo "main JAR: $MAIN_JAR"
+          if unzip -l "$MAIN_JAR" | grep -qE ' native/'; then
+            echo "ERROR: main JAR contains native libraries"; exit 1
+          fi
+          # Protos moved to their own artifact; re-adding the srcDirs here would silently
+          # duplicate ~6,500 classes into the bridge JAR.
+          if unzip -l "$MAIN_JAR" | grep -qE ' (io/temporal/api|coresdk)/'; then
+            echo "ERROR: main JAR contains generated proto classes"; exit 1
+          fi
+          echo "OK: main JAR is clean"
+
+          # Each classifier JAR must hold exactly one library, under the expected platform dir,
+          # and be large enough to be real. An empty or mis-copied classifier JAR would otherwise
+          # publish silently and fail only at a user's runtime.
+          check() {
+            local jar="$1" platform="$2"
+            [ -f "$jar" ] || { echo "ERROR: missing $jar"; exit 1; }
+            local n
+            n=$(unzip -Z1 "$jar" | grep -cE "^native/${platform}/[^/]+$")
+            [ "$n" -eq 1 ] || { echo "ERROR: $jar has $n libs under native/$platform/"; unzip -Z1 "$jar"; exit 1; }
+            local bytes
+            bytes=$(stat -c%s "$jar")
+            [ "$bytes" -gt 1000000 ] || { echo "ERROR: $jar is only $bytes bytes"; exit 1; }
+            echo "OK: $(basename "$jar") -> native/$platform ($bytes bytes)"
+          }
+          V=$(ls core-bridge/build/libs/ | grep -oE 'core-bridge-.*-macos-aarch64\.jar' | sed 's/core-bridge-//; s/-macos-aarch64\.jar//')
+          for p in linux-x86_64-gnu linux-aarch64-gnu macos-aarch64 windows-x86_64; do
+            check "core-bridge/build/libs/core-bridge-$V-$p.jar" "$p"
+          done
+
+      - name: Publish to Maven Central
+        run: |
+          ./gradlew publishToMavenCentral \
+            -PskipNativeBuild=true \
+            -PsigningInMemoryKey="${{ secrets.SIGNING_KEY }}" \
+            -PsigningInMemoryKeyPassword="${{ secrets.SIGNING_PASSWORD }}" \
+            -PmavenCentralUsername="${{ secrets.OSSRH_USERNAME }}" \
+            -PmavenCentralPassword="${{ secrets.OSSRH_TOKEN }}" \
+            --no-configuration-cache --no-daemon
+
+      - name: Upload artifacts to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            core-bridge/build/libs/*.jar
+            core-common/build/libs/*.jar
+            protos/build/libs/*.jar
