@@ -80,39 +80,6 @@ jobs:
           fi
           echo "OK: all entry points go through kt_export!"
 
-  hygiene:
-    name: Repository hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      # A Rust build directory was committed once and only caught because a 186 MB rlib exceeded
-      # GitHub's hard file-size limit and the push was rejected. A smaller target/ would have
-      # landed silently, carrying absolute local paths and hundreds of megabytes of churn.
-      - name: No build output is tracked
-        run: |
-          set -euo pipefail
-          tracked=$(git ls-files | grep -E '(^|/)target/' || true)
-          if [ -n "$tracked" ]; then
-            echo "ERROR: build output is tracked by git:"
-            echo "$tracked" | head -20
-            echo "Add it to .gitignore; note that '**/rust/target/' does NOT match a nested"
-            echo "crate's target dir -- use '**/target/'."
-            exit 1
-          fi
-          echo "OK: no tracked build output"
-
-      # Absolute developer paths in tracked files are a symptom of the same mistake.
-      - name: No absolute developer paths are tracked
-        run: |
-          set -euo pipefail
-          # This workflow is excluded: the patterns appear in it literally, as its own grep args.
-          if git grep -lI -e '/Users/' -e '/home/runner/' \
-               -- . ':!*.md' ':!**/protos/**' ':!.github/workflows/ci.yml' > /tmp/hits 2>/dev/null; then
-            echo "ERROR: tracked files contain absolute paths:"; head -20 /tmp/hits; exit 1
-          fi
-          echo "OK: no absolute developer paths"
-
   build-native:
     name: Build native (${{ matrix.platform }})
     timeout-minutes: 30

@@ -19,6 +19,7 @@ pub mod error;
 pub mod handle;
 pub mod panic;
 pub mod queue;
+pub mod rpc;
 pub mod runtime;
 pub mod worker;
 
@@ -187,6 +188,49 @@ kt_export! {
                     queue::Pending::ack(req_id).kind(KtKind::ClientConnected).aux0(handle)
                 }
                 Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
+            }
+        });
+        Ok(())
+    }
+}
+
+kt_export! {
+    /// Makes one gRPC call. The completion's `status` is the gRPC status code (0 on success), the
+    /// payload is the encoded response on success or the status message on failure.
+    ///
+    /// `service`: 0 workflow, 1 operator, 2 test, 3 health. `rpc` is the PascalCase method name.
+    fn kt_client_rpc(
+        runtime: u64,
+        client: u64,
+        service: u32,
+        rpc_ptr: *const u8,
+        rpc_len: u32,
+        req_ptr: *const u8,
+        req_len: u32,
+        req_id: u64,
+    ) {
+        if req_id == 0 {
+            return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
+        }
+        let rt = HANDLES.runtime(runtime)?;
+        let cl = HANDLES.client(client)?;
+        let service = rpc::Service::from_u32(service)?;
+        let rpc_name = std::str::from_utf8(unsafe { slice(rpc_ptr, rpc_len) }?)
+            .map_err(|e| KtError::InvalidArgument(format!("rpc name is not UTF-8: {e}")))?
+            .to_string();
+        let request = unsafe { slice(req_ptr, req_len) }?.to_vec();
+
+        runtime::spawn_request(&rt, req_id, async move {
+            match rpc::call(&cl.connection, service, &rpc_name, &request).await {
+                Ok(outcome) if outcome.status_code == 0 => queue::Pending::ack(req_id)
+                    .kind(KtKind::Rpc)
+                    .payload(outcome.payload),
+                // A gRPC error is reported with the server's own status code, so the JVM can
+                // raise the exception the server intended rather than a generic failure.
+                Ok(outcome) => queue::Pending::error(req_id, outcome.status_code, outcome.message)
+                    .kind(KtKind::Rpc),
+                Err(err) => queue::Pending::error(req_id, err.code(), err.to_string())
+                    .kind(KtKind::Rpc),
             }
         });
         Ok(())
