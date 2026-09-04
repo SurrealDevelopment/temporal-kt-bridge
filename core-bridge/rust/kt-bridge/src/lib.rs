@@ -309,6 +309,71 @@ kt_export! {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Ephemeral servers
+// ---------------------------------------------------------------------------------------------
+
+kt_export! {
+    /// Starts a dev or test server. The completion carries the handle in `aux0` and an
+    /// `EphemeralServerInfo` protobuf (target, pid, has_test_service) as its payload.
+    fn kt_ephemeral_start(runtime: u64, cfg: *const u8, cfg_len: u32, req_id: u64) {
+        if req_id == 0 {
+            return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
+        }
+        let rt = HANDLES.runtime(runtime)?;
+        let options = ephemeral::decode_options(unsafe { slice(cfg, cfg_len) }?)?;
+
+        runtime::spawn_request(&rt, req_id, async move {
+            match ephemeral::start(options).await {
+                Ok(server) => {
+                    let info = server.info();
+                    let handle = HANDLES.insert(Entry::Ephemeral(server));
+                    queue::Pending::ack(req_id)
+                        .kind(KtKind::EphemeralStarted)
+                        .aux0(handle)
+                        .payload(prost::Message::encode_to_vec(&info))
+                }
+                Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
+            }
+        });
+        Ok(())
+    }
+}
+
+kt_export! {
+    /// Writes an `EphemeralServerInfo` protobuf. Readable before, during and after shutdown,
+    /// because the pid is captured at start rather than read off the live child.
+    fn kt_ephemeral_info(server: u64, out: *mut u8, cap: u32, out_len: *mut u32) {
+        let entry = HANDLES.ephemeral(server)?;
+        let bytes = prost::Message::encode_to_vec(&entry.info());
+        unsafe { write_out(&bytes, out, cap, out_len) }
+    }
+}
+
+kt_export! {
+    fn kt_ephemeral_shutdown(runtime: u64, server: u64, req_id: u64) {
+        if req_id == 0 {
+            return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
+        }
+        let rt = HANDLES.runtime(runtime)?;
+        let entry = HANDLES.ephemeral(server)?;
+        runtime::spawn_request(&rt, req_id, async move {
+            match entry.shutdown().await {
+                Ok(()) => queue::Pending::ack(req_id),
+                Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
+            }
+        });
+        Ok(())
+    }
+}
+
+kt_export! {
+    fn kt_ephemeral_free(server: u64) {
+        HANDLES.remove_of_kind(server, handle::KIND_EPHEMERAL)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Completion queue
 // ---------------------------------------------------------------------------------------------
 

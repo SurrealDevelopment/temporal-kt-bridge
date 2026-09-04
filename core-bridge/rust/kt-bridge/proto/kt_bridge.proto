@@ -70,3 +70,30 @@ message WorkerOptions {
 message WorkerShutdownOptions {
   uint64 grace_millis = 1;
 }
+
+message EphemeralServerOptions {
+  // Either an existing binary, or a cached download.
+  string existing_path = 1;
+  string download_version = 2;   // "default" or "vX.Y.Z"
+  string download_dest_dir = 3;
+  string sdk_name = 4;
+  string sdk_version = 5;
+
+  string namespace = 6;
+  string ip = 7;
+  uint32 port = 8;
+  bool ui = 9;
+  repeated string extra_args = 10;
+  // Time-skipping test server instead of the dev server.
+  bool test_server = 11;
+  // Where the child's output goes. Empty means discard. Never the JVM's own stdio: an
+  // orphaned child holding that is what hangs a Gradle build after the tests have passed.
+  string log_file = 12;
+}
+
+message EphemeralServerInfo {
+  string target = 1;
+  // OS pid of the child. The C bridge needed a fork patch to expose this; it is public Rust API.
+  uint32 pid = 2;
+  bool has_test_service = 3;
+}
