@@ -52,11 +52,25 @@ object NativeLoader {
      *   since silently falling back to the classpath would hide the very change being tested.
      */
     private fun loadFromOverride(): SymbolLookup? {
-        val configured =
-            System.getProperty(LIBRARY_PATH_PROPERTY)
-                ?: System.getenv(LIBRARY_PATH_ENV)
-                ?: return null
+        val path =
+            resolveOverridePath(
+                System.getProperty(LIBRARY_PATH_PROPERTY) ?: System.getenv(LIBRARY_PATH_ENV),
+            ) ?: return null
 
+        System.load(path.toString())
+        libraryPath = path
+        return SymbolLookup.libraryLookup(path, arena).also { symbolLookup = it }
+    }
+
+    /**
+     * Validates a configured override path, returning null when none is configured.
+     *
+     * Separate from [loadFromOverride] so it can be tested without the singleton: [load] caches
+     * its lookup, so once anything has loaded the library a test calling [load] never reaches the
+     * override branch at all.
+     */
+    internal fun resolveOverridePath(configured: String?): Path? {
+        if (configured == null) return null
         val path = Path.of(configured).toAbsolutePath()
         if (!Files.isRegularFile(path)) {
             throw UnsatisfiedLinkError(
@@ -64,10 +78,7 @@ object NativeLoader {
                     "Point it at a built library, or unset it to use the one on the classpath.",
             )
         }
-
-        System.load(path.toString())
-        libraryPath = path
-        return SymbolLookup.libraryLookup(path, arena).also { symbolLookup = it }
+        return path
     }
 
     /**
