@@ -250,16 +250,10 @@ jobs:
             platform: macos-aarch64
             artifact-name: native-libs-macos-aarch64
             artifact-path: core-bridge/build/native-libs/native/macos-aarch64
-            expected-libs: 1
-          # Windows was disabled in temporal-kt because the 30-minute cargo build made it
-          # unreliable. That cost is gone here (the native is a downloaded artifact), so it runs
-          # again -- non-blocking until it has a track record.
           - os: windows-latest
             platform: windows-x86_64
             artifact-name: native-libs-windows
             artifact-path: core-bridge/build/native-libs/native/windows-x86_64
-            expected-libs: 1
-            experimental: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
