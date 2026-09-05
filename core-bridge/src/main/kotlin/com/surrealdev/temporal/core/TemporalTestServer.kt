@@ -55,7 +55,12 @@ class TemporalTestServer private constructor(
 
     override val targetUrl: String get() = kt.target
 
-    /** Captured at start, so it stays readable after shutdown. */
+    /**
+     * The OS pid of the server process, or null once it has been shut down.
+     *
+     * Null after [close] on purpose: the process is gone, and the OS is free to hand that number
+     * to something else.
+     */
     override val pid: Long? get() = if (closed) null else kt.pid.takeIf { it > 0 }?.toLong()
 
     override fun isClosed(): Boolean = closed
@@ -65,6 +70,7 @@ class TemporalTestServer private constructor(
         suspend fun start(
             runtime: TemporalRuntime,
             existingPath: String? = null,
+            downloadVersion: String = "default",
             downloadTtlSeconds: Long = 0,
             searchAttributes: List<Pair<String, String>> = emptyList(),
             extraArgs: List<String> = emptyList(),
@@ -84,7 +90,11 @@ class TemporalTestServer private constructor(
                     runtime.kt,
                     EphemeralServerOptionsProto.encode(
                         existingPath = existingPath,
-                        downloadVersion = BuildConfig.TEMPORAL_CLI_VERSION,
+                        // NOT the Temporal CLI version: the time-skipping test server is a
+                        // separate artifact on its own version line, so a CLI tag like v1.6.1
+                        // 404s on temporal.download. "default" lets Core pick the version it was
+                        // built against.
+                        downloadVersion = downloadVersion,
                         namespace = "default",
                         ip = "127.0.0.1",
                         extraArgs = allArgs,
