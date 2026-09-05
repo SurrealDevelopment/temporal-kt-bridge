@@ -48,17 +48,42 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # All four Linux flavours are cross-compiled with zig from this one runner: gnu against a
-          # pinned glibc floor (see glibcFloor in core-bridge/build.gradle.kts), and musl for
-          # Alpine. Building on the runner's own glibc produced libraries that would not load on
-          # Debian 12 / Ubuntu 22.04 / RHEL 9.
+          # Every Linux flavour is cross-compiled with zig on its own ubuntu runner: gnu against a
+          # pinned glibc floor (see glibcFloor in core-bridge/build.gradle.kts), musl for Alpine.
+          # Building on the runner's own glibc produced libraries that would not load on
+          # Debian 12 / Ubuntu 22.04 / RHEL 9. One entry per target rather than one runner doing
+          # all four in series: four release builds back to back ran past the job timeout.
           - os: ubuntu-24.04
-            platform: linux
-            rust-targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
-            gradle-task: copyLinuxNativeLibs
-            artifact-name: native-libs-linux
-            artifact-path: core-bridge/build/native-libs/native
-            expected-libs: 4
+            platform: linux-x86_64-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            gradle-task: copyNativeLibLinuxx8664
+            artifact-name: native-libs-linux-x86_64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
+            expected-libs: 1
+            zig: true
+          - os: ubuntu-24.04
+            platform: linux-aarch64-gnu
+            rust-targets: aarch64-unknown-linux-gnu
+            gradle-task: copyNativeLibLinuxAarch64
+            artifact-name: native-libs-linux-aarch64-gnu
+            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
+            expected-libs: 1
+            zig: true
+          - os: ubuntu-24.04
+            platform: linux-x86_64-musl
+            rust-targets: x86_64-unknown-linux-musl
+            gradle-task: copyNativeLibLinuxx8664Musl
+            artifact-name: native-libs-linux-x86_64-musl
+            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-musl
+            expected-libs: 1
+            zig: true
+          - os: ubuntu-24.04
+            platform: linux-aarch64-musl
+            rust-targets: aarch64-unknown-linux-musl
+            gradle-task: copyNativeLibLinuxAarch64Musl
+            artifact-name: native-libs-linux-aarch64-musl
+            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-musl
+            expected-libs: 1
             zig: true
           - os: macos-14
             platform: macos-aarch64
@@ -198,11 +223,11 @@ jobs:
       - name: Place native libs
         run: |
           set -euo pipefail
-          # The Linux artifact is the whole native/ tree (four platform dirs); the others are one
-          # platform dir each.
-          mkdir -p core-bridge/build/native-libs/native
-          cp -rv /tmp/natives/native-libs-linux/* core-bridge/build/native-libs/native/
           declare -A MAP=(
+            [native-libs-linux-x86_64-gnu]=linux-x86_64-gnu
+            [native-libs-linux-aarch64-gnu]=linux-aarch64-gnu
+            [native-libs-linux-x86_64-musl]=linux-x86_64-musl
+            [native-libs-linux-aarch64-musl]=linux-aarch64-musl
             [native-libs-macos-aarch64]=macos-aarch64
             [native-libs-windows]=windows-x86_64
           )
