@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use temporalio_client::GrpcCompression;
 use temporalio_client::{Connection, ConnectionOptions};
 
 use crate::error::{KtError, KtResult};
@@ -27,13 +28,28 @@ pub fn connection_options(config: &crate::proto::ClientOptions) -> KtResult<Conn
     // cannot be applied conditionally with reassignment. The `maybe_*` setters take an Option and
     // keep the chain in one expression.
     //
-    // client_name / client_version are deliberately absent: they are no longer part of
-    // ConnectionOptions in SDK-Core 0.8, having moved to the higher-level client. They are still
-    // in the proto so the JVM surface does not have to change when they are wired back up.
+    // client-name / client-version go on every RPC as headers. Core would otherwise stamp its
+    // own ("temporal-rust" / the Core crate version), and servers key behaviour on these: the Java
+    // time-skipping test server answers a woken long poll for an unrecognised client with a bare
+    // UNKNOWN. Sent through the headers map because the dedicated setters are gated behind Core's
+    // `core-based-sdk` feature; the header interceptor honours a value that is already present.
+    let mut headers = std::collections::HashMap::new();
+    if !config.client_name.is_empty() {
+        headers.insert("client-name".to_string(), config.client_name.clone());
+    }
+    if !config.client_version.is_empty() {
+        headers.insert("client-version".to_string(), config.client_version.clone());
+    }
     Ok(ConnectionOptions::new(target)
+        .maybe_headers((!headers.is_empty()).then_some(headers))
         // Defaulted rather than required: Core rejects an empty identity when a worker is built,
         // and failing there is a confusing place to learn that a client option was missing.
         .identity(default_identity(&config.identity))
+        .grpc_compression(if config.no_compression {
+            GrpcCompression::None
+        } else {
+            GrpcCompression::Gzip
+        })
         .maybe_api_key(non_empty(&config.api_key))
         .maybe_connect_timeout(
             (config.connect_timeout_millis > 0)

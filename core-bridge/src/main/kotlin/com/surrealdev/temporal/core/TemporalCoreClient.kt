@@ -102,6 +102,9 @@ class TemporalCoreClient private constructor(
                         namespace = namespace,
                         identity = options.identity.orEmpty(),
                         apiKey = apiKey.orEmpty(),
+                        noCompression = options.grpcCompression == GrpcCompression.NONE,
+                        clientName = options.clientName,
+                        clientVersion = options.clientVersion,
                     ),
                 )
             return TemporalCoreClient(client, runtime, normalizedUrl, namespace)
@@ -167,6 +170,9 @@ internal object ClientOptionsProto {
         namespace: String,
         identity: String,
         apiKey: String,
+        noCompression: Boolean = false,
+        clientName: String = "",
+        clientVersion: String = "",
     ): ByteArray {
         val out = java.io.ByteArrayOutputStream()
 
@@ -188,7 +194,13 @@ internal object ClientOptionsProto {
         field(1, targetUrl)
         field(2, namespace)
         field(3, identity)
+        field(4, clientName)
+        field(5, clientVersion)
         field(6, apiKey)
+        if (noCompression) {
+            out.write((8 shl 3) or 0)
+            out.write(1)
+        }
         return out.toByteArray()
     }
 }

@@ -53,6 +53,29 @@ pub struct RpcOutcome {
     pub message: String,
 }
 
+/// Bounds a call with a client-side deadline, reporting DEADLINE_EXCEEDED when it elapses.
+///
+/// Deliberately NOT `Request::set_timeout`. That sends a `grpc-timeout` header, so the server
+/// enforces the deadline as well and the two race: tonic's own timer yields CANCELLED, while a
+/// server that cancels its handler answers with whatever its framework makes of that -- grpc-java
+/// (the time-skipping test server) sends UNKNOWN with no message. Dropping the future instead
+/// resets the h2 stream, which the server sees as a plain cancellation with nothing to answer, and
+/// the caller gets the one code that means "the window elapsed".
+async fn with_deadline<T>(
+    timeout: Option<std::time::Duration>,
+    call: impl std::future::Future<Output = Result<T, tonic::Status>>,
+) -> Result<T, tonic::Status> {
+    match timeout {
+        None => call.await,
+        Some(t) => match tokio::time::timeout(t, call).await {
+            Ok(result) => result,
+            Err(_) => Err(tonic::Status::deadline_exceeded(format!(
+                "client deadline of {t:?} elapsed"
+            ))),
+        },
+    }
+}
+
 /// The status message, falling back to the transport error chain when gRPC gave none.
 ///
 /// tonic reports an h2/hyper failure (connection closed, stream reset) as UNKNOWN with an empty
@@ -82,13 +105,8 @@ macro_rules! dispatch {
                 $name => {
                     let decoded: $req = prost::Message::decode($bytes)
                         .map_err(|e| KtError::InvalidArgument(format!("{} request: {e}", $name)))?;
-                    let mut request = Request::new(decoded);
-                    // A real gRPC deadline rather than a local timer, so the server stops working
-                    // on an abandoned long poll instead of holding the connection.
-                    if let Some(t) = $timeout {
-                        request.set_timeout(t);
-                    }
-                    match $client.$method(request).await {
+                    let request = Request::new(decoded);
+                    match with_deadline($timeout, $client.$method(request)).await {
                         Ok(response) => Ok(RpcOutcome {
                             payload: prost::Message::encode_to_vec(&response.into_inner()),
                             status_code: 0,
@@ -293,11 +311,7 @@ async fn call_test_service_unit(
 ) -> KtResult<Option<RpcOutcome>> {
     let result = match rpc {
         "GetCurrentTime" => {
-            let mut request = Request::new(());
-            if let Some(t) = timeout {
-                request.set_timeout(t);
-            }
-            Some(client.get_current_time(request).await)
+            Some(with_deadline(timeout, client.get_current_time(Request::new(()))).await)
         }
         _ => None,
     };

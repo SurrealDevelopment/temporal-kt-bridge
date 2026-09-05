@@ -6,6 +6,7 @@ import io.temporal.api.workflowservice.v1.GetSystemInfoRequest
 import io.temporal.api.workflowservice.v1.GetSystemInfoResponse
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -18,7 +19,7 @@ import kotlin.test.assertTrue
  */
 class RpcTimeoutTest {
     @Test
-    fun `a call that outlives its timeout is cut off with a deadline status`() =
+    fun `a call that outlives its timeout reports DEADLINE_EXCEEDED`() =
         runBlocking<Unit> {
             TemporalRuntime.create().use { runtime ->
                 TemporalTestServer.start(runtime).use { server ->
@@ -42,13 +43,13 @@ class RpcTimeoutTest {
                             }
                         val elapsedMs = (System.nanoTime() - started) / 1_000_000
 
-                        // tonic reports its own client-side deadline as CANCELLED ("Timeout
-                        // expired") rather than DEADLINE_EXCEEDED, which is what a server-enforced
-                        // deadline would produce. Callers treat both as "the window elapsed"; what
-                        // must never come back is UNKNOWN, which is what an unbounded call died with.
-                        assertTrue(
-                            error.statusCode == GRPC_CANCELLED || error.statusCode == GRPC_DEADLINE_EXCEEDED,
-                            "expected CANCELLED or DEADLINE_EXCEEDED, got ${error.statusCode}: ${error.message}",
+                        // Exactly DEADLINE_EXCEEDED: the bridge applies the deadline on the client
+                        // and never sends grpc-timeout, so there is no server-side race that could
+                        // answer first with CANCELLED or (grpc-java) an UNKNOWN with no message.
+                        assertEquals(
+                            GRPC_DEADLINE_EXCEEDED,
+                            error.statusCode,
+                            "callers branch on this exact code; got ${error.statusCode}: ${error.message}",
                         )
                         assertTrue(elapsedMs >= 900, "the call returned before its window, in ${elapsedMs}ms")
                         assertTrue(elapsedMs < 10_000, "the deadline must bound the call, took ${elapsedMs}ms")
@@ -76,7 +77,6 @@ class RpcTimeoutTest {
         }
 
     private companion object {
-        const val GRPC_CANCELLED = 1
         const val GRPC_DEADLINE_EXCEEDED = 4
     }
 }
