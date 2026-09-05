@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
-  # Publishing needs four repository secrets. Without them the publish step fails only after the
+  # Publishing needs Maven credentials and a signing key. Without them the publish step fails only after the
   # 30-minute native matrix has run, so check first and skip the whole workflow cleanly instead.
   # `secrets` is not available to a job-level `if`, hence a preflight job with an output.
   preflight:
@@ -30,183 +30,25 @@ jobs:
       - id: check
         env:
           OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          OSSRH_TOKEN: ${{ secrets.OSSRH_TOKEN }}
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
-          if [ -n "$OSSRH_USERNAME" ] && [ -n "$SIGNING_KEY" ]; then
+          if [ -n "$OSSRH_USERNAME" ] && [ -n "$OSSRH_TOKEN" ] && [ -n "$SIGNING_KEY" ]; then
             echo "can-publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "can-publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping publish: set OSSRH_USERNAME, OSSRH_TOKEN, SIGNING_KEY and SIGNING_PASSWORD to enable it."
+            echo "::notice::Skipping publish: set OSSRH_USERNAME, OSSRH_TOKEN and SIGNING_KEY to enable it (SIGNING_PASSWORD is needed for encrypted keys)."
           fi
 
-  build-native:
-    name: Build native (${{ matrix.platform }})
+  verify:
+    name: Build and test release artifacts
     needs: [preflight]
     if: needs.preflight.outputs.can-publish == 'true'
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Every Linux flavour is cross-compiled with zig on its own ubuntu runner: gnu against a
-          # pinned glibc floor (see glibcFloor in core-bridge/build.gradle.kts), musl for Alpine.
-          # Building on the runner's own glibc produced libraries that would not load on
-          # Debian 12 / Ubuntu 22.04 / RHEL 9. One entry per target rather than one runner doing
-          # all four in series: four release builds back to back ran past the job timeout.
-          - os: ubuntu-24.04
-            platform: linux-x86_64-gnu
-            rust-targets: x86_64-unknown-linux-gnu
-            gradle-task: copyNativeLibLinuxx8664
-            artifact-name: native-libs-linux-x86_64-gnu
-            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
-            expected-libs: 1
-            zig: true
-          - os: ubuntu-24.04
-            platform: linux-aarch64-gnu
-            rust-targets: aarch64-unknown-linux-gnu
-            gradle-task: copyNativeLibLinuxAarch64
-            artifact-name: native-libs-linux-aarch64-gnu
-            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
-            expected-libs: 1
-            zig: true
-          - os: ubuntu-24.04
-            platform: linux-x86_64-musl
-            rust-targets: x86_64-unknown-linux-musl
-            gradle-task: copyNativeLibLinuxx8664Musl
-            artifact-name: native-libs-linux-x86_64-musl
-            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-musl
-            expected-libs: 1
-            zig: true
-          - os: ubuntu-24.04
-            platform: linux-aarch64-musl
-            rust-targets: aarch64-unknown-linux-musl
-            gradle-task: copyNativeLibLinuxAarch64Musl
-            artifact-name: native-libs-linux-aarch64-musl
-            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-musl
-            expected-libs: 1
-            zig: true
-          - os: macos-14
-            platform: macos-aarch64
-            rust-targets: aarch64-apple-darwin
-            gradle-task: copyMacosAarch64NativeLib
-            artifact-name: native-libs-macos-aarch64
-            artifact-path: core-bridge/build/native-libs/native/macos-aarch64
-            expected-libs: 1
-          - os: windows-latest
-            platform: windows-x86_64
-            rust-targets: x86_64-pc-windows-msvc
-            gradle-task: copyWindowsNativeLib
-            artifact-name: native-libs-windows
-            artifact-path: core-bridge/build/native-libs/native/windows-x86_64
-            expected-libs: 1
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache native library
-        id: native-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ matrix.artifact-path }}
-          # Everything that shapes the library, not just the sources: Cargo.toml (profile: lto,
-          # strip), .cargo/config.toml (musl -crt-static), the Gradle script (zig, glibc floor) and
-          # this workflow (how the toolchain is set up). The first per-target zig run restored a
-          # library the old native aarch64 job had built against glibc 2.39, skipped the build,
-          # and the floor check rejected it -- the key had not changed. The v2 prefix retires
-          # those entries.
-          key: native-v2-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/kt-bridge/Cargo.lock', 'core-bridge/rust/kt-bridge/Cargo.toml', 'core-bridge/rust/kt-bridge/.cargo/**', 'core-bridge/rust/kt-bridge/build.rs', 'core-bridge/rust/kt-bridge/rust-toolchain.toml', 'core-bridge/rust/kt-bridge/src/**', 'core-bridge/rust/kt-bridge/proto/**', 'core-bridge/build.gradle.kts', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
-      - uses: actions/setup-java@v4
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        with:
-          java-version: '25'
-          distribution: 'graalvm'
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        with:
-          toolchain: stable
-          target: ${{ matrix.rust-targets }}
-          cache-workspaces: "core-bridge/rust -> target"
-          cache-all-crates: true
-          cache-on-failure: true
-          rustflags: ""
-      - name: Install protobuf (Linux)
-        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Install zig + cargo-zigbuild (Linux cross builds)
-        if: steps.native-cache.outputs.cache-hit != 'true' && matrix.zig
-        run: pip3 install --user cargo-zigbuild && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      # From inside the crate directory on purpose: that is where rust-toolchain.toml pins the
-      # compiler, and `rustup target add` installs a target's std for whichever toolchain is
-      # active. Run from the repo root it would land on `stable`, and the pinned toolchain would
-      # then fail every cross build with "can't find crate for `core`".
-      - name: Install cross targets for the pinned toolchain
-        if: steps.native-cache.outputs.cache-hit != 'true' && matrix.zig
-        working-directory: core-bridge/rust/kt-bridge
-        run: rustup target add $(echo "${{ matrix.rust-targets }}" | tr ',' ' ')
-      - name: Install protobuf (macOS)
-        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
-        run: brew install protobuf
-      - name: Install protobuf (Windows)
-        if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: gradle/actions/setup-gradle@v4
-        if: steps.native-cache.outputs.cache-hit != 'true'
-      - name: Build native library
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        run: ./gradlew :core-bridge:${{ matrix.gradle-task }} --no-daemon
-
-      # A Copy task whose source is missing is a silent no-op in Gradle, and a cargo build that
-      # writes somewhere unexpected then yields a green job with no artifact -- which is exactly
-      # what CARGO_TARGET_DIR=C:\t did here before it was removed. Fail loudly instead.
-      - name: Verify native library was produced
-        shell: bash
-        run: |
-          set -euo pipefail
-          count=$(find "${{ matrix.artifact-path }}" -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) 2>/dev/null | wc -l)
-          if [ "$count" -ne "${{ matrix.expected-libs }}" ]; then
-            echo "ERROR: expected ${{ matrix.expected-libs }} native libraries in ${{ matrix.artifact-path }}, found $count"
-            ls -laR "${{ matrix.artifact-path }}" 2>/dev/null || echo "(directory does not exist)"
-            exit 1
-          fi
-          find "${{ matrix.artifact-path }}" -type f -exec ls -la {} +
-
-      # The floor is only real if something checks it. A gnu library must need nothing newer than
-      # the pinned glibc, and a musl library must need no glibc symbol at all -- otherwise a
-      # future toolchain or dependency bump quietly ships a library that fails to load on the
-      # distributions the floor exists for.
-      - name: Verify glibc floor
-        if: matrix.zig
-        shell: bash
-        run: |
-          set -euo pipefail
-          floor=$(grep -oE 'val glibcFloor = "[0-9.]+"' core-bridge/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+')
-          echo "pinned glibc floor: $floor"
-          fail=0
-          for so in $(find "${{ matrix.artifact-path }}" -name '*.so' -path '*-gnu/*'); do
-            need=$(objdump -T "$so" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -u | tail -1)
-            echo "$so needs glibc $need"
-            if [ "$(printf '%s\n%s\n' "$floor" "$need" | sort -t. -k1,1n -k2,2n | tail -1)" != "$floor" ]; then
-              echo "ERROR: $so requires GLIBC_$need, above the floor $floor"; fail=1
-            fi
-          done
-          for so in $(find "${{ matrix.artifact-path }}" -name '*.so' -path '*-musl/*'); do
-            if objdump -T "$so" | grep -q 'GLIBC_'; then
-              echo "ERROR: musl library $so references glibc symbols"; fail=1
-            fi
-            echo "$so: no glibc symbols (musl)"
-          done
-          exit $fail
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact-name }}
-          path: ${{ matrix.artifact-path }}
-          retention-days: 1
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: Publish to Maven Central
-    needs: [preflight, build-native]
+    needs: [preflight, verify]
     if: needs.preflight.outputs.can-publish == 'true'
     timeout-minutes: 30
     runs-on: ubuntu-latest
@@ -275,12 +117,12 @@ jobs:
           MAIN_JAR=$(ls core-bridge/build/libs/core-bridge-*.jar \
             | grep -Ev -- '-(linux|macos|windows)|-sources|-javadoc|-native-host' | head -1)
           echo "main JAR: $MAIN_JAR"
-          if unzip -l "$MAIN_JAR" | grep -qE ' native/'; then
+          if unzip -l "$MAIN_JAR" | grep -E ' native/' > /dev/null; then
             echo "ERROR: main JAR contains native libraries"; exit 1
           fi
           # Protos moved to their own artifact; re-adding the srcDirs here would silently
           # duplicate ~6,500 classes into the bridge JAR.
-          if unzip -l "$MAIN_JAR" | grep -qE ' (io/temporal/api|coresdk)/'; then
+          if unzip -l "$MAIN_JAR" | grep -E ' (io/temporal/api|coresdk)/' > /dev/null; then
             echo "ERROR: main JAR contains generated proto classes"; exit 1
           fi
           echo "OK: main JAR is clean"

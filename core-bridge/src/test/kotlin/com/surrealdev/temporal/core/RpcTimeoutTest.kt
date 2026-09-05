@@ -59,7 +59,7 @@ class RpcTimeoutTest {
         }
 
     @Test
-    fun `a timeout of zero means no deadline`() =
+    fun `a timeout of zero uses Core defaults`() =
         runBlocking<Unit> {
             TemporalRuntime.create().use { runtime ->
                 TemporalDevServer.start(runtime).use { server ->

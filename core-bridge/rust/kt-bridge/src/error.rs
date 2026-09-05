@@ -52,3 +52,35 @@ impl From<prost::DecodeError> for KtError {
 }
 
 pub type KtResult<T = ()> = Result<T, KtError>;
+
+/// tonic labels its local transport deadline CANCELLED. A server's cancellation has no
+/// TimeoutExpired source and must keep its original code, even if its message is identical.
+pub(crate) fn grpc_status_code(status: &tonic::Status) -> i32 {
+    if status.code() == tonic::Code::Cancelled {
+        let mut cause = std::error::Error::source(status);
+        while let Some(error) = cause {
+            if error.is::<tonic::TimeoutExpired>() {
+                return tonic::Code::DeadlineExceeded as i32;
+            }
+            cause = error.source();
+        }
+    }
+    status.code() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_local_transport_timeouts_are_deadline_exceeded() {
+        let local = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        assert_eq!(local.code(), tonic::Code::Cancelled);
+        assert_eq!(
+            grpc_status_code(&local),
+            tonic::Code::DeadlineExceeded as i32
+        );
+        let server = tonic::Status::cancelled(local.message());
+        assert_eq!(grpc_status_code(&server), tonic::Code::Cancelled as i32);
+    }
+}

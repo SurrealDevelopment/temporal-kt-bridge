@@ -1,10 +1,12 @@
 package com.surrealdev.temporal.core
 
+import com.google.protobuf.ByteString
 import com.google.protobuf.CodedInputStream
 import com.google.protobuf.MessageLite
 import com.surrealdev.temporal.core.kt.KtClient
 import com.surrealdev.temporal.core.kt.KtService
 import org.slf4j.LoggerFactory
+import com.surrealdev.temporal.core.proto.ClientOptions as ProtoClientOptions
 
 /**
  * Transport-level gRPC compression for client connections.
@@ -25,7 +27,12 @@ data class ClientOptions(
     val clientVersion: String = BuildConfig.SDK_VERSION,
     val identity: String? = null,
     val grpcCompression: GrpcCompression = GrpcCompression.GZIP,
-)
+    val connectTimeoutMillis: Long = 0,
+) {
+    init {
+        require(connectTimeoutMillis >= 0) { "connectTimeoutMillis must not be negative" }
+    }
+}
 
 /**
  * A high-level wrapper for the Temporal Core client.
@@ -86,35 +93,14 @@ class TemporalCoreClient private constructor(
                 logger.warn("tlsDisabled=true but the target URL is https://; TLS will NOT be used.")
             }
 
-            val normalizedUrl =
-                if (targetUrl.startsWith("http://", true) || targetUrl.startsWith("https://", true)) {
-                    targetUrl
-                } else {
-                    val useTls = !tlsDisabled && (tls != null || apiKey != null)
-                    if (useTls) "https://$targetUrl" else "http://$targetUrl"
-                }
-
-            val client =
-                KtClient.connect(
-                    runtime.kt,
-                    ClientOptionsProto.encode(
-                        targetUrl = normalizedUrl,
-                        namespace = namespace,
-                        identity = options.identity.orEmpty(),
-                        apiKey = apiKey.orEmpty(),
-                        noCompression = options.grpcCompression == GrpcCompression.NONE,
-                        clientName = options.clientName,
-                        clientVersion = options.clientVersion,
-                        // https:// means TLS, with the system roots unless a config says otherwise.
-                        tls = normalizedUrl.startsWith("https://", ignoreCase = true),
-                        tlsConfig = if (tlsDisabled) null else tls,
-                    ),
-                )
+            val config = clientConfig(targetUrl, namespace, options, tls, apiKey, tlsDisabled)
+            val normalizedUrl = config.targetUrl
+            val client = KtClient.connect(runtime.kt, config.toByteArray())
             return TemporalCoreClient(client, runtime, normalizedUrl, namespace)
         }
     }
 
-    fun isClosed(): Boolean = closed
+    fun isClosed(): Boolean = closed || runtime.isClosed()
 
     private fun ensureOpen() {
         check(!closed) { "Client has been closed" }
@@ -150,8 +136,8 @@ class TemporalCoreClient private constructor(
         parser: (CodedInputStream) -> Resp,
     ): Resp {
         ensureOpen()
-        // 0 means no deadline. A caller that long-polls sets one and reads DEADLINE_EXCEEDED as
-        // "the window elapsed", so dropping it here would turn every poll into an unbounded wait.
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        // Zero keeps Core's RPC defaults; a positive timeout bounds the call including retries.
         val response = kt.call(service, rpc, request.toByteArray(), timeoutMillis.toLong())
         return parser(CodedInputStream.newInstance(response))
     }
@@ -166,69 +152,36 @@ class TemporalCoreClient private constructor(
     }
 }
 
-/** Encodes `kt_bridge.ClientOptions` by hand: the bridge's own config protos are not published. */
-internal object ClientOptionsProto {
-    fun encode(
-        targetUrl: String,
-        namespace: String,
-        identity: String,
-        apiKey: String,
-        noCompression: Boolean = false,
-        clientName: String = "",
-        clientVersion: String = "",
-        tls: Boolean = false,
-        tlsConfig: TlsConfig? = null,
-    ): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-
-        fun bytesField(
-            number: Int,
-            bytes: ByteArray?,
-        ) {
-            if (bytes == null || bytes.isEmpty()) return
-            out.write((number shl 3) or 2)
-            var length = bytes.size
-            while (length >= 0x80) {
-                out.write((length and 0x7F) or 0x80)
-                length = length ushr 7
+/** Build the bridge config after resolving TLS consistently for every target spelling. */
+internal fun clientConfig(
+    targetUrl: String,
+    namespace: String,
+    options: ClientOptions = ClientOptions(),
+    tls: TlsConfig? = null,
+    apiKey: String? = null,
+    tlsDisabled: Boolean = false,
+): ProtoClientOptions {
+    val https = targetUrl.startsWith("https://", ignoreCase = true)
+    val address =
+        if (https || targetUrl.startsWith("http://", ignoreCase = true)) targetUrl.substringAfter("://") else targetUrl
+    val useTls = !tlsDisabled && (https || tls != null || apiKey != null)
+    return ProtoClientOptions
+        .newBuilder()
+        .apply {
+            this.targetUrl = "${if (useTls) "https" else "http"}://$address"
+            this.namespace = namespace
+            identity = options.identity.orEmpty()
+            clientName = options.clientName
+            clientVersion = options.clientVersion
+            this.apiKey = apiKey.orEmpty()
+            connectTimeoutMillis = options.connectTimeoutMillis
+            noCompression = options.grpcCompression == GrpcCompression.NONE
+            this.tls = useTls
+            if (useTls && tls != null) {
+                tls.serverRootCaCert?.let { serverRootCaCert = ByteString.copyFrom(it) }
+                tls.domain?.let { tlsDomain = it }
+                tls.clientCert?.let { clientCert = ByteString.copyFrom(it) }
+                tls.clientPrivateKey?.let { clientPrivateKey = ByteString.copyFrom(it) }
             }
-            out.write(length)
-            out.write(bytes)
-        }
-
-        fun field(
-            number: Int,
-            value: String,
-        ) {
-            if (value.isEmpty()) return
-            val bytes = value.toByteArray(Charsets.UTF_8)
-            out.write((number shl 3) or 2)
-            var length = bytes.size
-            while (length >= 0x80) {
-                out.write((length and 0x7F) or 0x80)
-                length = length ushr 7
-            }
-            out.write(length)
-            out.write(bytes)
-        }
-        field(1, targetUrl)
-        field(2, namespace)
-        field(3, identity)
-        field(4, clientName)
-        field(5, clientVersion)
-        field(6, apiKey)
-        if (noCompression) {
-            out.write((8 shl 3) or 0)
-            out.write(1)
-        }
-        if (tls) {
-            out.write((9 shl 3) or 0)
-            out.write(1)
-        }
-        bytesField(10, tlsConfig?.serverRootCaCert)
-        field(11, tlsConfig?.domain.orEmpty())
-        bytesField(12, tlsConfig?.clientCert)
-        bytesField(13, tlsConfig?.clientPrivateKey)
-        return out.toByteArray()
-    }
+        }.build()
 }

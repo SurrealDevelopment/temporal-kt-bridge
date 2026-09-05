@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package kt_bridge;
 
+option java_package = "com.surrealdev.temporal.core.proto";
+option java_multiple_files = true;
+
 // Configuration crosses the ABI as protobuf rather than as #[repr(C)] structs.
 //
 // This is the main reason the JVM binding layer shrinks from 21,589 hand-maintained lines to a
@@ -13,6 +16,8 @@ package kt_bridge;
 
 message RuntimeOptions {
   TelemetryOptions telemetry = 1;
+  // Absent uses Core default; zero disables worker heartbeats.
+  optional uint64 worker_heartbeat_interval_millis = 2;
 }
 
 message TelemetryOptions {
@@ -22,13 +27,13 @@ message TelemetryOptions {
   bool forward_logs = 1;
   // tracing filter, e.g. "WARN" or "temporal_sdk_core=DEBUG".
   string log_filter = 2;
-  string metrics_prometheus_bind_address = 3;
-  string metrics_otel_url = 4;
+  reserved 3, 4; // Metrics are exported through the application's JVM Meter.
+  bool buffer_metrics = 5;
 }
 
 message RuntimeInfo {
   string core_version = 1;
-  string prometheus_bind_address = 2;
+  reserved 2;
 }
 
 message ServerLogLine {
@@ -40,6 +45,8 @@ message LogRecord {
   string target = 1;
   string message = 2;
   string fields_json = 3;
+  // ERROR, WARN, INFO, DEBUG, TRACE.
+  string level = 4;
 }
 
 message ClientOptions {
@@ -68,26 +75,64 @@ message WorkerOptions {
   string task_queue = 2;
   string identity = 3;
   uint32 max_cached_workflows = 4;
-  // 0 means "let Core choose".
-  uint32 max_concurrent_workflow_tasks = 5;
-  uint32 max_concurrent_activities = 6;
-  uint32 max_concurrent_local_activities = 7;
+  // Absent means Core's default; an explicit zero is invalid.
+  optional uint32 max_concurrent_workflow_tasks = 5;
+  optional uint32 max_concurrent_activities = 6;
+  optional uint32 max_concurrent_local_activities = 7;
   bool no_remote_activities = 8;
-  // Optional identifier; versioning itself is not wired through yet.
+  // Identifies unversioned workers. Deployment options take precedence when present.
   string build_id = 9;
 
-  // Resource-based tuning. Core shares one controller (and therefore one set of targets and
-  // gains) across a worker's slot types, so the targets live here while each slot type carries
-  // its own limits. A slot type with no limits stays fixed-size, so the three can be mixed.
   ResourceBasedTuner resource_tuner = 10;
   ResourceSlotLimits workflow_resource_limits = 11;
   ResourceSlotLimits activity_resource_limits = 12;
   ResourceSlotLimits local_activity_resource_limits = 13;
-
-  // Negated so that proto3's false default means "enabled", matching no_remote_activities above
-  // and WorkerConfig's own defaults.
   bool no_workflows = 14;
   bool no_local_activities = 15;
+
+  WorkerDeploymentOptions deployment_options = 16;
+  // Absent lets Core select behavior from namespace capabilities.
+  PollerBehavior workflow_poller_behavior = 17;
+  PollerBehavior activity_poller_behavior = 18;
+  PollerBehavior nexus_poller_behavior = 19;
+  optional uint64 max_heartbeat_throttle_interval_millis = 20;
+  optional uint64 default_heartbeat_throttle_interval_millis = 21;
+  // Zero or absent disables the corresponding rate limit.
+  optional double max_activities_per_second = 22;
+  optional double max_task_queue_activities_per_second = 23;
+  optional float nonsticky_to_sticky_poll_ratio = 24;
+  optional uint64 sticky_queue_schedule_to_start_timeout_millis = 25;
+  // Absent leaves cancellation to the caller; zero cancels immediately after shutdown starts.
+  optional uint64 graceful_shutdown_period_millis = 26;
+  bool nondeterminism_as_workflow_fail = 27;
+  repeated string nondeterminism_as_workflow_fail_for_types = 28;
+  // Absence keeps Core's default of 3; zero disables eager activity execution.
+  optional uint32 max_eager_activity_reservations_per_workflow_task = 29;
+  bool disable_payload_error_limit = 30;
+  bool enable_nexus = 31;
+  optional uint32 max_concurrent_nexus_tasks = 32;
+  ResourceSlotLimits nexus_resource_limits = 33;
+}
+
+message WorkerDeploymentOptions {
+  string deployment_name = 1;
+  string build_id = 2;
+  bool use_worker_versioning = 3;
+  // 0 = no default, 1 = pinned, 2 = auto-upgrade; other values are rejected.
+  uint32 default_versioning_behavior = 4;
+}
+
+message PollerBehavior {
+  oneof strategy {
+    uint32 simple_maximum = 1;
+    PollerAutoscaling autoscaling = 2;
+  }
+}
+
+message PollerAutoscaling {
+  uint32 minimum = 1;
+  uint32 maximum = 2;
+  uint32 initial = 3;
 }
 
 // Core's resource-based slot supplier, which hands out slots while memory and CPU are under
@@ -97,6 +142,8 @@ message WorkerOptions {
 // seven FFM upcalls on the path in front of every poll. Core's version is the same algorithm with
 // the same default gains, so the only thing the JVM copy bought was the upcalls.
 message ResourceBasedTuner {
+  // JVM computes per-type admission decisions; native code manages permits and throttling.
+  bool jvm_resource_based = 11;
   // Both in [0.0, 1.0].
   double target_memory_usage = 1;
   double target_cpu_usage = 2;
@@ -118,6 +165,7 @@ message ResourceBasedTuner {
 message ResourceSlotLimits {
   // Slots handed out regardless of resource pressure, and a hard ceiling.
   uint32 minimum_slots = 1;
+  // Required for a resource supplier; zero is invalid.
   uint32 maximum_slots = 2;
   // Minimum wait between issuing slots once past minimum_slots, to stop burst allocation.
   uint64 ramp_throttle_millis = 3;
@@ -153,4 +201,43 @@ message EphemeralServerInfo {
   // OS pid of the child. The C bridge needed a fork patch to expose this; it is public Rust API.
   uint32 pid = 2;
   bool has_test_service = 3;
+}
+
+message RpcFailure {
+  string message = 1;
+  bytes details = 2;
+}
+
+message MetricBatch {
+  repeated MetricDefinition definitions = 1;
+  repeated MetricUpdate updates = 2;
+  repeated LogRecord logs = 3;
+}
+
+message MetricDefinition {
+  uint64 id = 1;
+  string name = 2;
+  string description = 3;
+  string unit = 4;
+  // Counter, gauge, gauge-f64, histogram, histogram-f64, duration, up-down counter.
+  uint32 kind = 5;
+}
+
+message MetricAttribute {
+  string key = 1;
+  oneof value {
+    string string_value = 2;
+    int64 int_value = 3;
+    double double_value = 4;
+    bool bool_value = 5;
+  }
+}
+
+message MetricUpdate {
+  uint64 instrument = 1;
+  repeated MetricAttribute attributes = 2;
+  oneof value {
+    int64 int_value = 3;
+    double double_value = 4;
+  }
 }

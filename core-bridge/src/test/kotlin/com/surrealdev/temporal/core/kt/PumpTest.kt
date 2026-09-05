@@ -1,6 +1,7 @@
 package com.surrealdev.temporal.core.kt
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -98,6 +99,41 @@ class PumpTest {
             val answers = withTimeout(30_000) { jobs.map { it.await() } }
             assertEquals(24, answers.size)
             assertEquals(24, answers.map { it.reqId }.toSet().size, "each request needs its own id")
+        }
+
+    @Test
+    fun `a resumed coroutine can close its own pump`() =
+        runBlocking {
+            java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { socket ->
+                val peer =
+                    Thread.ofPlatform().start {
+                        socket.accept().use {
+                            // Keep the handshake pending until the requesting coroutine has suspended.
+                            Thread.sleep(200)
+                        }
+                    }
+                try {
+                    val elapsed =
+                        withTimeout(5_000) {
+                            async(Dispatchers.Unconfined) {
+                                pump.request { reqId ->
+                                    KtBridge.clientConnect(
+                                        runtime,
+                                        clientConfig("http://127.0.0.1:${socket.localPort}"),
+                                        reqId,
+                                    )
+                                }
+                                assertTrue(Thread.currentThread().name.startsWith("temporal-pump-"))
+                                val started = System.nanoTime()
+                                pump.close()
+                                (System.nanoTime() - started) / 1_000_000
+                            }.await()
+                        }
+                    assertTrue(elapsed < 1_000, "closing on the pump thread took ${elapsed}ms")
+                } finally {
+                    peer.join(1_000)
+                }
+            }
         }
 
     /** Minimal `kt_bridge.ClientOptions`: field 1 is target_url. */

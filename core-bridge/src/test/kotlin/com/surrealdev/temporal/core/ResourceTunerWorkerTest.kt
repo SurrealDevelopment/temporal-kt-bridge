@@ -1,10 +1,14 @@
 package com.surrealdev.temporal.core
 
 import coresdk.activity_task.ActivityTaskOuterClass
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -46,5 +50,67 @@ class ResourceTunerWorkerTest {
                     }
                 }
             }
+        }
+
+    @Test
+    fun `closing a worker from its metrics callback preserves sampling`(): Unit =
+        runBlocking {
+            val samplerThread = CompletableDeferred<Thread>()
+            TemporalRuntime.create().use { runtime ->
+                TemporalDevServer.start(runtime).use { server ->
+                    TemporalCoreClient.connect(runtime, server.targetUrl, "default").use { client ->
+                        val config =
+                            WorkerConfig(
+                                workflowSlotSupplier = SlotSupplier.JvmResourceBased(maximumSlots = 20),
+                                activitySlotSupplier = SlotSupplier.FixedSize(5),
+                                localActivitySlotSupplier = SlotSupplier.FixedSize(5),
+                            )
+                        val firstWorker =
+                            TemporalWorker.create(
+                                runtime,
+                                client,
+                                "resource-callback-close",
+                                "default",
+                                config,
+                            )
+                        firstWorker.use { first ->
+                            val secondWorker =
+                                TemporalWorker.create(
+                                    runtime,
+                                    client,
+                                    "resource-survivor",
+                                    "default",
+                                    config,
+                                )
+                            secondWorker.use { second ->
+                                val closed = CompletableDeferred<Unit>()
+                                val sampledAgain = CompletableDeferred<Unit>()
+                                var subsequentSamples = 0
+                                first.onSlotSupplierMetrics {
+                                    samplerThread.complete(Thread.currentThread())
+                                    first.close()
+                                    closed.complete(Unit)
+                                }
+                                second.onSlotSupplierMetrics {
+                                    // One workflow sample per tick: require a later tick to prove
+                                    // callback removal did not kill the scheduled sampler.
+                                    if (closed.isCompleted && ++subsequentSamples >= 2) sampledAgain.complete(Unit)
+                                }
+                                withTimeout(5_000) {
+                                    closed.await()
+                                    sampledAgain.await()
+                                }
+                                assertTrue(first.isClosed())
+                                assertFalse(second.isClosed())
+                                second.initiateShutdown()
+                                second.awaitShutdown()
+                            }
+                        }
+                    }
+                }
+            }
+            val thread = samplerThread.await()
+            thread.join(2_000)
+            assertFalse(thread.isAlive, "closing the runtime must terminate its sampler thread")
         }
 }

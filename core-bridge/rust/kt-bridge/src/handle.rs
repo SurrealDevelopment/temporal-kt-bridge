@@ -20,6 +20,7 @@ const GEN_MASK: u64 = 0x00FF_FFFF;
 
 pub struct Slot {
     generation: u32,
+    owner: u64,
     entry: Option<Entry>,
 }
 
@@ -50,16 +51,32 @@ impl HandleTable {
     }
 
     pub fn insert(&self, entry: Entry) -> u64 {
-        let kind = entry.kind() as u64;
+        Self::insert_into(&mut self.inner.write(), entry, 0)
+    }
+
+    /// Validates and inserts under one lock so a creation racing runtime free cannot escape it.
+    pub fn insert_owned(&self, runtime: u64, entry: Entry) -> KtResult<u64> {
         let mut table = self.inner.write();
+        if Self::validate(&table, runtime, KIND_RUNTIME).is_err() {
+            drop(table);
+            entry.close();
+            return Err(KtError::Shutdown);
+        }
+        Ok(Self::insert_into(&mut table, entry, runtime))
+    }
+
+    fn insert_into(table: &mut Table, entry: Entry, owner: u64) -> u64 {
+        let kind = entry.kind() as u64;
         let index = match table.free.pop() {
             Some(index) => {
                 table.slots[index as usize].entry = Some(entry);
+                table.slots[index as usize].owner = owner;
                 index
             }
             None => {
                 table.slots.push(Slot {
                     generation: 1,
+                    owner,
                     entry: Some(entry),
                 });
                 (table.slots.len() - 1) as u32
@@ -67,6 +84,38 @@ impl HandleTable {
         };
         let generation = table.slots[index as usize].generation as u64;
         (kind << KIND_SHIFT) | ((generation & GEN_MASK) << GEN_SHIFT) | index as u64
+    }
+
+    /// Invalidates a runtime and all resources it created before releasing any resource.
+    /// Pollers are deliberately unowned: their payload slabs must survive until the pump exits.
+    pub fn remove_runtime(
+        &self,
+        runtime: u64,
+    ) -> KtResult<(Arc<crate::runtime::RuntimeEntry>, Vec<Entry>)> {
+        let mut table = self.inner.write();
+        let index = Self::validate(&table, runtime, KIND_RUNTIME)?;
+        let Entry::Runtime(entry) = Self::take(&mut table, index) else {
+            unreachable!()
+        };
+        let mut children = Vec::new();
+        // ponytail: scan on runtime close; add an owner index only if large tables make close slow.
+        for index in 0..table.slots.len() {
+            if table.slots[index].owner == runtime {
+                children.push(Self::take(&mut table, index));
+            }
+        }
+        Ok((entry, children))
+    }
+
+    pub fn require_owner(&self, handle: u64, runtime: u64) -> KtResult {
+        let table = self.inner.read();
+        let index = Self::validate(&table, handle, (handle >> KIND_SHIFT) as u8)?;
+        if table.slots[index].owner != runtime {
+            return Err(KtError::InvalidArgument(
+                "handle belongs to a different runtime".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Removes the entry and invalidates every copy of the handle.
@@ -80,45 +129,47 @@ impl HandleTable {
     /// safety used to come only from matching the `Entry` variant on the read path, which the
     /// remove path never did.
     pub fn remove_of_kind(&self, handle: u64, expected_kind: u8) -> KtResult<Entry> {
-        // Handle 0 is not a wrong-kind handle, it is not a handle at all -- a zeroed or
-        // default-initialised field on the JVM side. Report that rather than a kind mismatch,
-        // which would send the reader looking for a transposed argument.
+        let mut table = self.inner.write();
+        let index = Self::validate(&table, handle, expected_kind)?;
+        Ok(Self::take(&mut table, index))
+    }
+
+    fn validate(table: &Table, handle: u64, expected_kind: u8) -> KtResult<usize> {
         if handle == 0 {
             return Err(KtError::StaleHandle);
         }
-        let index = (handle as u32) as usize;
-        let generation = ((handle >> GEN_SHIFT) & GEN_MASK) as u32;
         if (handle >> KIND_SHIFT) as u8 != expected_kind {
             return Err(KtError::WrongHandleKind);
         }
-        let mut table = self.inner.write();
-        let slot = table.slots.get_mut(index).ok_or(KtError::StaleHandle)?;
-        if slot.generation != generation {
+        let index = handle as u32 as usize;
+        let slot = table.slots.get(index).ok_or(KtError::StaleHandle)?;
+        if slot.generation != ((handle >> GEN_SHIFT) & GEN_MASK) as u32 {
             return Err(KtError::StaleHandle);
         }
-        let entry = slot.entry.take().ok_or(KtError::StaleHandle)?;
-        // Mask to the 24 bits that are actually encoded in the handle. Bumping the full u32 and
-        // clamping with `.max(1)` only avoided generation 0 at the 2^32 wrap, while `insert`
-        // encodes `generation & GEN_MASK`: after 2^24 cycles a slot issued a handle whose encoded
-        // generation was 0 while the slot held 0x1000000, so the very first use of a freshly
-        // issued handle came back StaleHandle and the entry leaked.
-        slot.generation = ((slot.generation + 1) & (GEN_MASK as u32)).max(1);
+        let entry = slot.entry.as_ref().ok_or(KtError::StaleHandle)?;
+        if entry.kind() != expected_kind {
+            return Err(KtError::WrongHandleKind);
+        }
+        Ok(index)
+    }
+
+    /// Called only after validation, or for a live owned slot while holding the table lock.
+    fn take(table: &mut Table, index: usize) -> Entry {
+        let slot = &mut table.slots[index];
+        let entry = slot.entry.take().expect("validated live slot");
+        slot.owner = 0;
+        slot.generation = ((slot.generation + 1) & GEN_MASK as u32).max(1);
         table.free.push(index as u32);
-        Ok(entry)
+        entry
     }
 
     fn with<R>(&self, handle: u64, f: impl FnOnce(&Entry) -> KtResult<R>) -> KtResult<R> {
-        let index = (handle as u32) as usize;
-        let generation = ((handle >> GEN_SHIFT) & GEN_MASK) as u32;
         let table = self.inner.read();
-        let slot = table.slots.get(index).ok_or(KtError::StaleHandle)?;
-        if slot.generation != generation {
-            return Err(KtError::StaleHandle);
-        }
-        match &slot.entry {
-            Some(entry) => f(entry),
-            None => Err(KtError::StaleHandle),
-        }
+        let index = Self::validate(&table, handle, (handle >> KIND_SHIFT) as u8)?;
+        f(table.slots[index]
+            .entry
+            .as_ref()
+            .expect("validated live slot"))
     }
 }
 
@@ -142,6 +193,15 @@ pub const KIND_EPHEMERAL: u8 = 4;
 pub const KIND_POLLER: u8 = 5;
 
 impl Entry {
+    /// Run outside the handle-table lock, while the owning runtime still exists.
+    pub fn close(&self) {
+        match self {
+            Entry::Worker(entry) => crate::worker::free(entry),
+            Entry::Ephemeral(entry) => entry.free(),
+            _ => {}
+        }
+    }
+
     fn kind(&self) -> u8 {
         match self {
             Entry::Runtime(_) => KIND_RUNTIME,
@@ -182,6 +242,49 @@ mod tests {
 
     fn poller_entry() -> Arc<crate::queue::PollerEntry> {
         Arc::new(Queue::new().poller())
+    }
+
+    #[test]
+    fn runtime_removal_invalidates_owned_slots_and_rejects_late_insertions() {
+        let table = HandleTable::new();
+        let runtime = crate::runtime::new_runtime(crate::proto::RuntimeOptions::default()).unwrap();
+        let owner = table.insert(Entry::Runtime(runtime));
+        let child = table
+            .insert_owned(owner, Entry::Poller(poller_entry()))
+            .unwrap();
+        let pump = table.insert(Entry::Poller(poller_entry()));
+        assert!(table.require_owner(child, owner).is_ok());
+        assert!(matches!(
+            table.require_owner(pump, owner),
+            Err(KtError::InvalidArgument(_))
+        ));
+        let (runtime, children) = table.remove_runtime(owner).unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(matches!(table.poller(child), Err(KtError::StaleHandle)));
+        assert!(
+            table.poller(pump).is_ok(),
+            "an unowned pump must keep its payload slab"
+        );
+        assert!(matches!(
+            table.insert_owned(owner, Entry::Poller(poller_entry())),
+            Err(KtError::Shutdown)
+        ));
+        let reused = table.insert(Entry::Poller(poller_entry()));
+        assert_ne!(reused, child);
+        assert!(table.poller(child).is_err());
+        crate::runtime::free_runtime(runtime);
+    }
+
+    #[test]
+    fn a_forged_kind_tag_does_not_remove_an_entry_of_another_kind() {
+        let table = HandleTable::new();
+        let poller = table.insert(Entry::Poller(poller_entry()));
+        let forged = (poller & !(0xFF << KIND_SHIFT)) | ((KIND_RUNTIME as u64) << KIND_SHIFT);
+        assert!(matches!(
+            table.remove_of_kind(forged, KIND_RUNTIME),
+            Err(KtError::WrongHandleKind)
+        ));
+        assert!(table.poller(poller).is_ok());
     }
 
     #[test]
@@ -263,6 +366,7 @@ mod tests {
             let mut inner = table.inner.write();
             inner.slots.push(Slot {
                 generation: 0x00FF_FFFF,
+                owner: 0,
                 entry: None,
             });
             inner.free.push(0);

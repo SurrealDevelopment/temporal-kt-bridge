@@ -101,7 +101,7 @@ def main() -> int:
             f"    bytes: &[u8],\n"
             f"    timeout: Option<std::time::Duration>,\n"
             f") -> KtResult<RpcOutcome> {{\n"
-            f"    let mut client = connection.{accessor}();\n"
+            f"    let mut client = connection.clone();\n"
             f"{unit_impl}"
             f"    dispatch!(client, rpc, bytes, timeout, {{\n{arms}\n    }})\n}}\n"
         )
@@ -109,16 +109,18 @@ def main() -> int:
             names = [a.split('"')[1] for a in unit_arms.split("\n")]
             methods = [a.split("=> ")[1].split("(")[0] for a in unit_arms.split("\n")]
             cases = "\n".join(
-                f'        "{n}" => Some(with_deadline(timeout, client.{m}(Request::new(()))).await),'
+                f'        "{n}" => Some(with_deadline(timeout, client.{m}(request)).await),'
                 for n, m in zip(names, methods)
             )
             parts.append(
                 f"\n/// Unit-request RPCs on {service}: nothing to decode, so they bypass `dispatch!`.\n"
                 f"async fn call_{accessor}_unit(\n"
-                f"    client: &mut Box<dyn temporalio_client::grpc::{service}>,\n"
+                f"    client: &mut Connection,\n"
                 f"    rpc: &str,\n"
                 f"    timeout: Option<std::time::Duration>,\n"
                 f") -> KtResult<Option<RpcOutcome>> {{\n"
+                "    let mut request = Request::new(());\n"
+                "    if let Some(timeout) = timeout { request.set_timeout(timeout); }\n"
                 f"    let result = match rpc {{\n{cases}\n        _ => None,\n    }};\n"
                 f"    Ok(result.map(|r| match r {{\n"
                 f"        Ok(response) => RpcOutcome {{\n"
@@ -127,8 +129,11 @@ def main() -> int:
                 f"            message: String::new(),\n"
                 f"        }},\n"
                 f"        Err(status) => RpcOutcome {{\n"
-                f"            payload: Vec::new(),\n"
-                f"            status_code: status.code() as i32,\n"
+                f"            payload: prost::Message::encode_to_vec(&crate::proto::RpcFailure {{\n"
+                f"                message: status_message(&status),\n"
+                f"                details: status.details().to_vec(),\n"
+                f"            }}),\n"
+                f"            status_code: grpc_status_code(&status),\n"
                 f"            message: status_message(&status),\n"
                 f"        }},\n"
                 f"    }}))\n}}\n"
@@ -158,14 +163,13 @@ HEADER = '''//! Raw gRPC dispatch.
 //! trip.
 
 use temporalio_client::Connection;
-// The service traits are not imported: methods are called on the returned
-// `Box<dyn WorkflowService>` etc., which is the trait object itself.
+use temporalio_client::grpc::{OperatorService, TestService, WorkflowService};
 use temporalio_common::protos::temporal::api::{
     operatorservice::v1::*, testservice::v1::*, workflowservice::v1::*,
 };
 use tonic::Request;
 
-use crate::error::{KtError, KtResult};
+use crate::error::{KtError, KtResult, grpc_status_code};
 
 /// Which gRPC service an RPC belongs to. Mirrors the JVM-side enum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -199,12 +203,8 @@ pub struct RpcOutcome {
 
 /// Bounds a call with a client-side deadline, reporting DEADLINE_EXCEEDED when it elapses.
 ///
-/// Deliberately NOT `Request::set_timeout`. That sends a `grpc-timeout` header, so the server
-/// enforces the deadline as well and the two race: tonic's own timer yields CANCELLED, while a
-/// server that cancels its handler answers with whatever its framework makes of that -- grpc-java
-/// (the time-skipping test server) sends UNKNOWN with no message. Dropping the future instead
-/// resets the h2 stream, which the server sees as a plain cancellation with nothing to answer, and
-/// the caller gets the one code that means "the window elapsed".
+/// This outer timeout covers every retry. The request also carries a timeout so Core's default
+/// 30-second per-attempt deadline does not shorten an explicitly longer call.
 async fn with_deadline<T>(
     timeout: Option<std::time::Duration>,
     call: impl std::future::Future<Output = Result<T, tonic::Status>>,
@@ -249,7 +249,10 @@ macro_rules! dispatch {
                 $name => {
                     let decoded: $req = prost::Message::decode($bytes)
                         .map_err(|e| KtError::InvalidArgument(format!("{} request: {e}", $name)))?;
-                    let request = Request::new(decoded);
+                    let mut request = Request::new(decoded);
+                    if let Some(timeout) = $timeout {
+                        request.set_timeout(timeout);
+                    }
                     match with_deadline($timeout, $client.$method(request)).await {
                         Ok(response) => Ok(RpcOutcome {
                             payload: prost::Message::encode_to_vec(&response.into_inner()),
@@ -257,8 +260,11 @@ macro_rules! dispatch {
                             message: String::new(),
                         }),
                         Err(status) => Ok(RpcOutcome {
-                            payload: Vec::new(),
-                            status_code: status.code() as i32,
+                            payload: prost::Message::encode_to_vec(&crate::proto::RpcFailure {
+                                message: status_message(&status),
+                                details: status.details().to_vec(),
+                            }),
+                            status_code: grpc_status_code(&status),
                             message: status_message(&status),
                         }),
                     }
@@ -285,6 +291,8 @@ pub async fn call(
         Service::Test => call_test_service(connection, rpc, bytes, timeout).await,
     }
 }
+
+
 '''
 
 if __name__ == "__main__":

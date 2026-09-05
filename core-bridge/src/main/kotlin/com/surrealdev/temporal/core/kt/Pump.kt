@@ -9,7 +9,6 @@ import java.lang.foreign.ValueLayout.JAVA_INT
 import java.lang.foreign.ValueLayout.JAVA_LONG
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /** One completion, copied out of the native batch buffer before the next poll invalidates it. */
@@ -99,14 +98,18 @@ internal class Pump(
         val reqId = nextRequestId()
         return suspendCancellableCoroutine { continuation ->
             pending[reqId] = continuation
-            if (dead) {
+            if (dead || !running) {
                 // Ordered after the insert on purpose: failPending() runs after `dead` is set, so
                 // a request that slips in between is either seen by it or fails here. Never
                 // neither.
-                pending.remove(reqId)
-                continuation.resumeWithException(
-                    KtBridgeException(KtBridge.KT_ERR_SHUTDOWN, "bridge pump has stopped; request $reqId not issued"),
-                )
+                if (pending.remove(reqId) != null) {
+                    continuation.resumeWithException(
+                        KtBridgeException(
+                            KtBridge.KT_ERR_SHUTDOWN,
+                            "bridge pump has stopped; request $reqId not issued",
+                        ),
+                    )
+                }
                 return@suspendCancellableCoroutine
             }
             try {
@@ -135,15 +138,19 @@ internal class Pump(
             Arena.ofShared().use { arena ->
                 val batch = arena.allocate(KtBridge.RECORD_BYTES * BATCH, 8)
                 val count = arena.allocate(JAVA_INT)
-                while (running) {
-                    val rc = KtBridge.poll(poller, batch, BATCH, POLL_TIMEOUT_MILLIS, count)
+                while (true) {
+                    // Once closing, drain queued resource results before releasing the poller.
+                    val timeout = if (running) POLL_TIMEOUT_MILLIS else 0
+                    val rc = KtBridge.poll(poller, batch, BATCH, timeout, count)
                     if (rc != KtBridge.KT_OK) {
                         // The queue is closed, or the poller is gone: either way there is nothing
                         // more to drain.
                         if (running) logger.debug("pump stopping, poll returned {}", rc)
                         break
                     }
-                    repeat(count.get(JAVA_INT, 0)) { dispatch(batch, it * KtBridge.RECORD_BYTES) }
+                    val size = count.get(JAVA_INT, 0)
+                    if (!running && size == 0) break
+                    repeat(size) { dispatch(batch, it * KtBridge.RECORD_BYTES) }
                 }
             }
         } catch (t: Throwable) {
@@ -153,6 +160,9 @@ internal class Pump(
             // this every suspended caller -- and every future one -- would wait forever.
             dead = true
             failPending()
+            // Only this thread may release the slab: close can time out or run inside a
+            // resumed Unconfined coroutine while the rest of this batch is still being read.
+            KtBridge.pollerFree(poller)
         }
     }
 
@@ -179,7 +189,10 @@ internal class Pump(
                 aux0 = batch.get(JAVA_LONG, offset + KtBridge.O_AUX0),
                 aux1 = batch.get(JAVA_LONG, offset + KtBridge.O_AUX1),
             )
+        dispatch(completion)
+    }
 
+    internal fun dispatch(completion: Completion) {
         if (completion.reqId == 0L) {
             // Pushed: a task, a log line, a server event. Never blocks the pump for long -- the
             // consumer is expected to hand off rather than process inline.
@@ -192,8 +205,8 @@ internal class Pump(
         // its caller gave up would otherwise sit in the native handle table forever, unknown to
         // anyone, with a child process outliving the JVM.
         val continuation = pending.remove(completion.reqId)
-        if (continuation != null && continuation.isActive) {
-            continuation.resume(completion)
+        if (continuation != null) {
+            continuation.resume(completion) { _, discarded, _ -> releaseDiscarded(discarded) }
         } else {
             releaseDiscarded(completion)
         }
@@ -231,9 +244,7 @@ internal class Pump(
     override fun close() {
         running = false
         KtBridge.pollerWake(poller)
-        thread.join(CLOSE_TIMEOUT_MILLIS)
-        KtBridge.pollerFree(poller)
-        failPending()
+        if (Thread.currentThread() !== thread) thread.join(CLOSE_TIMEOUT_MILLIS)
     }
 
     private companion object {

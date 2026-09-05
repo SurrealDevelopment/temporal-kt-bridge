@@ -70,7 +70,8 @@ fn a_dev_server_starts_reports_its_pid_and_shuts_down() {
             }
             Err(message) => queue::Pending::error(1, -8, message),
         }
-    });
+    })
+    .expect("request accepted");
 
     let started = wait_for(&poller, Duration::from_secs(60), 1).expect("server never started");
     assert_eq!(started.status, KT_OK, "dev server failed to start");
@@ -107,7 +108,8 @@ fn a_dev_server_starts_reports_its_pid_and_shuts_down() {
             Ok(()) => queue::Pending::ack(2),
             Err(message) => queue::Pending::error(2, -8, message),
         }
-    });
+    })
+    .expect("request accepted");
     let stopped = wait_for(&poller, Duration::from_secs(30), 2).expect("shutdown never completed");
     assert_eq!(stopped.status, KT_OK, "shutdown reported an error");
 

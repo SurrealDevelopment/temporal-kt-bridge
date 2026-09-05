@@ -85,10 +85,11 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
                         .kind(KtKind::ClientConnected)
                         .aux0(handle)
                 }
-                Err(message) => queue::Pending::error(1, -8, message),
+                Err(error) => client::connect_failure(1, error),
             }
         }
-    });
+    })
+    .expect("request accepted");
 
     let connected = wait_for(&poller, Duration::from_secs(20), |r| r.req_id == 1)
         .expect("client connect produced no completion");
@@ -130,7 +131,8 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
                 Err(message) => queue::Pending::error(2, -8, message),
             }
         }
-    });
+    })
+    .expect("request accepted");
 
     let mut stream_ends = 0;
     let done = wait_for(&poller, Duration::from_secs(30), |r| {
@@ -151,5 +153,121 @@ fn a_worker_starts_polls_and_shuts_down_without_hanging() {
         "every poll stream must report ShutDown exactly once"
     );
 
+    runtime::free_runtime(rt);
+}
+
+#[test]
+fn force_free_releases_pumps_even_when_an_activation_was_not_completed() {
+    use prost::Message;
+    use std::sync::{Arc, atomic::Ordering};
+    use temporalio_common::protos::temporal::api::{
+        common::v1::{WorkflowExecution, WorkflowType},
+        taskqueue::v1::TaskQueue,
+        workflowservice::v1::{StartWorkflowExecutionRequest, TerminateWorkflowExecutionRequest},
+    };
+    let Some(address) = server_address() else {
+        eprintln!("skipping: set TEMPORAL_TEST_ADDRESS to run this against a dev server");
+        return;
+    };
+    let rt = runtime::new_runtime(proto::RuntimeOptions::default()).unwrap();
+    let cl = rt
+        .core
+        .tokio_handle()
+        .block_on(client::connect(
+            client::connection_options(&proto::ClientOptions {
+                target_url: format!("http://{address}"),
+                namespace: "default".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+            "default".into(),
+        ))
+        .unwrap();
+    let id = format!(
+        "kt-force-free-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let config = worker::worker_config(&proto::WorkerOptions {
+        namespace: "default".into(),
+        task_queue: id.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let core = rt
+        .core
+        .tokio_handle()
+        .block_on(async {
+            temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone())
+        })
+        .unwrap();
+    let entry = Arc::new(worker::WorkerEntry::new(
+        Arc::new(core),
+        rt.sender(),
+        rt.core.tokio_handle().clone(),
+    ));
+    let handle = HANDLES.insert(Entry::Worker(entry.clone()));
+    let weak = Arc::downgrade(&entry.core().unwrap());
+    let poller = rt.queue.poller();
+    worker::start(&entry, &rt, handle).unwrap();
+    let request = StartWorkflowExecutionRequest {
+        namespace: "default".into(),
+        workflow_id: id.clone(),
+        request_id: id.clone(),
+        workflow_type: Some(WorkflowType {
+            name: "force-free".into(),
+        }),
+        task_queue: Some(TaskQueue {
+            name: id.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let started = rt
+        .core
+        .tokio_handle()
+        .block_on(kt_bridge::rpc::call(
+            &cl.connection,
+            kt_bridge::rpc::Service::Workflow,
+            "StartWorkflowExecution",
+            &request.encode_to_vec(),
+            Some(Duration::from_secs(10)),
+        ))
+        .unwrap();
+    assert_eq!(started.status_code, 0);
+    wait_for(&poller, Duration::from_secs(10), |r| {
+        r.kind == KtKind::TaskWorkflowActivation as u32
+    })
+    .expect("expected an outstanding activation before force-close");
+    assert_eq!(unsafe { kt_bridge::kt_worker_free(handle) }, KT_OK);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while weak.upgrade().is_some() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        weak.upgrade().is_none(),
+        "force-close retained the Core worker while waiting for a lost completion"
+    );
+    assert_eq!(entry.live_pumps.load(Ordering::Acquire), 0);
+    let terminate = TerminateWorkflowExecutionRequest {
+        namespace: "default".into(),
+        workflow_execution: Some(WorkflowExecution {
+            workflow_id: id,
+            run_id: String::new(),
+        }),
+        ..Default::default()
+    };
+    rt.core
+        .tokio_handle()
+        .block_on(kt_bridge::rpc::call(
+            &cl.connection,
+            kt_bridge::rpc::Service::Workflow,
+            "TerminateWorkflowExecution",
+            &terminate.encode_to_vec(),
+            Some(Duration::from_secs(10)),
+        ))
+        .unwrap();
     runtime::free_runtime(rt);
 }

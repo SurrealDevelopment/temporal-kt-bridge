@@ -1,5 +1,6 @@
 package com.surrealdev.temporal.core
 
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -63,4 +64,28 @@ class TemporalRuntimeTest {
         runtime2.close()
         assertTrue(runtime2.isClosed())
     }
+
+    @Test
+    fun `closing a runtime releases public children and their registry entries`() =
+        runBlocking {
+            val runtime = TemporalRuntime.create()
+            try {
+                TemporalDevServer.start(runtime).use { server ->
+                    TemporalCoreClient.connect(runtime, server.targetUrl).use { client ->
+                        TemporalWorker.create(runtime, client, "runtime-owned-worker", "default").use { worker ->
+                            assertTrue(server in EphemeralServers.liveServers())
+                            runtime.close()
+                            assertTrue(client.isClosed())
+                            assertTrue(worker.isClosed())
+                            assertTrue(server.isClosed())
+                            assertFalse(server in EphemeralServers.liveServers())
+                            EphemeralServers.register(server)
+                            assertFalse(server in EphemeralServers.liveServers())
+                        }
+                    }
+                }
+            } finally {
+                runtime.close()
+            }
+        }
 }

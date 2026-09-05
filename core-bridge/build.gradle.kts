@@ -4,6 +4,7 @@ plugins {
     id("buildsrc.convention.kotlin-jvm")
     id("buildsrc.convention.maven-publish")
     id("com.github.gmazzo.buildconfig")
+    alias(libs.plugins.protobuf)
 }
 
 // Versioned as `<sdkCoreVersion>-<temporal-kt version>` (e.g. 0.6.0-0.1.11): this artifact's
@@ -39,18 +40,30 @@ dependencies {
     compileOnly(libs.opentelemetryApi)
 
     testImplementation(kotlin("test"))
+    testImplementation(libs.opentelemetrySdkTesting)
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${libs.versions.protobuf.get()}"
+    }
+}
+
+sourceSets.main {
+    proto { setSrcDirs(listOf("rust/kt-bridge/proto")) }
 }
 
 // Detect current platform
 val os: OperatingSystem = OperatingSystem.current()
-val arch: String = System.getProperty("os.arch")
+val arch: String = System.getProperty("os.arch").lowercase()
+val linuxLibc = if (File("/lib").listFiles()?.any { it.name.startsWith("ld-musl-") } == true) "musl" else "gnu"
 
 val nativePlatform: String =
     when {
         os.isMacOsX && arch == "aarch64" -> "macos-aarch64"
-        os.isLinux && arch == "aarch64" -> "linux-aarch64-gnu"
-        os.isLinux -> "linux-x86_64-gnu"
-        os.isWindows -> "windows-x86_64"
+        os.isLinux && arch == "aarch64" -> "linux-aarch64-$linuxLibc"
+        os.isLinux && arch in setOf("amd64", "x86_64") -> "linux-x86_64-$linuxLibc"
+        os.isWindows && arch in setOf("amd64", "x86_64") -> "windows-x86_64"
         else -> throw GradleException("Unsupported platform: ${os.name} / $arch")
     }
 
@@ -116,7 +129,7 @@ fun registerNativeBuild(
             inputs.files(
                 fileTree("rust/kt-bridge") {
                     include("Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml")
-                    include("src/**/*.rs", "proto/**/*.proto")
+                    include("src/**/*.rs", "proto/**/*.proto", ".cargo/**")
                 },
             )
             outputs.file(builtLib)
@@ -236,6 +249,16 @@ val copyWindowsNativeLib by tasks.registering {
     dependsOn(copyNativeLibWindowsx8664)
 }
 
+val nativeCopies =
+    mapOf(
+        "linux-x86_64-gnu" to copyNativeLibLinuxx8664,
+        "linux-aarch64-gnu" to copyNativeLibLinuxAarch64,
+        "linux-x86_64-musl" to copyNativeLibLinuxx8664Musl,
+        "linux-aarch64-musl" to copyNativeLibLinuxAarch64Musl,
+        "macos-aarch64" to copyNativeLibMacosAarch64,
+        "windows-x86_64" to copyNativeLibWindowsx8664,
+    )
+
 // Create platform-specific classifier JARs containing only the native library
 nativePlatforms.forEach { platform ->
     val taskName = "${platform.classifier.replace("-", "").replace("_", "")}NativeJar"
@@ -243,6 +266,34 @@ nativePlatforms.forEach { platform ->
         description = "Create classifier JAR with native library for ${platform.classifier}"
         group = "build"
         archiveClassifier.set(platform.classifier)
+        if (!skipNativeBuild) {
+            dependsOn(
+                if (platform.classifier ==
+                    nativePlatform
+                ) {
+                    copyNativeLib
+                } else {
+                    nativeCopies.getValue(platform.classifier)
+                },
+            )
+        }
+        val nativeDir = nativeLibsDir.map { it.dir("native/${platform.resourceDir}") }
+        val libraryName =
+            when {
+                platform.classifier.startsWith("windows") -> "kt_bridge.dll"
+                platform.classifier.startsWith("macos") -> "libkt_bridge.dylib"
+                else -> "libkt_bridge.so"
+            }
+        doFirst {
+            check(
+                nativeDir
+                    .get()
+                    .file(libraryName)
+                    .asFile.isFile,
+            ) {
+                "Missing $libraryName for ${platform.classifier}; build or download the native before publishing"
+            }
+        }
         from(nativeLibsDir.map { it.dir("native/${platform.resourceDir}") }) {
             into("native/${platform.resourceDir}")
         }
@@ -263,6 +314,8 @@ val hostNativeJar by tasks.registering(Jar::class) {
     description = "JAR containing the host platform's native library, for consumers inside this build"
     group = "build"
     archiveClassifier.set("native-host")
+    val hostLibrary = nativeLibsDir.map { it.file("native/$nativePlatform/$libPrefix$nativeLibName.$libExtension") }
+    doFirst { check(hostLibrary.get().asFile.isFile) { "Host native library is missing: ${hostLibrary.get()}" } }
     if (!skipNativeBuild) {
         dependsOn(copyNativeLib)
     }

@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -56,6 +57,42 @@ class KtEphemeralServerTest {
                         // The pid stays readable after shutdown; the C bridge read the live child
                         // and could not.
                         assertTrue(server.pid > 0)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `closing the runtime frees delivered servers clients and workers`() {
+        val path =
+            cli() ?: run {
+                println("skipping: set TEMPORAL_CLI_PATH to a temporal binary to run this")
+                return
+            }
+        KtRuntime.create().use { runtime ->
+            runBlocking {
+                withTimeout(120_000) {
+                    KtEphemeralServer.start(runtime, serverOptions(path)).use { server ->
+                        val child = ProcessHandle.of(server.pid.toLong()).orElseThrow()
+                        KtClient.connect(runtime, clientOptions(server.target)).use { client ->
+                            val options =
+                                com.surrealdev.temporal.core.proto.WorkerOptions
+                                    .newBuilder()
+                                    .setNamespace("default")
+                                    .setTaskQueue("runtime-cascade")
+                                    .build()
+                            KtWorker.create(runtime, client, options.toByteArray()).use { worker ->
+                                worker.start()
+                                runtime.close()
+                                assertEquals(KtBridge.KT_ERR_STALE_HANDLE, KtBridge.clientFree(client.handle))
+                                assertEquals(KtBridge.KT_ERR_STALE_HANDLE, KtBridge.workerFree(worker.handle))
+                                assertEquals(KtBridge.KT_ERR_STALE_HANDLE, KtBridge.ephemeralFree(server.handle))
+                                assertTrue(server.runtimeClosed)
+                                child.onExit().get(5, java.util.concurrent.TimeUnit.SECONDS)
+                                assertFalse(child.isAlive, "runtime close must stop its delivered server")
+                            }
+                        }
                     }
                 }
             }

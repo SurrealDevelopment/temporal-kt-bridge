@@ -1,6 +1,8 @@
 package com.surrealdev.temporal.core.kt
 
 import com.surrealdev.temporal.core.TemporalCoreException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -40,7 +42,12 @@ class KtWorkerIntegrationTest {
                             // call does not throw or abort, which is the SIGABRT race.)
                             worker.heartbeat(ByteArray(0))
 
-                            worker.shutdown(graceMillis = 30_000)
+                            // Both callers must observe the same successful shutdown. Holding one
+                            // Core Arc per caller used to make each finalizer wait on the other.
+                            listOf(
+                                async { worker.shutdown(graceMillis = 30_000) },
+                                async { worker.shutdown(graceMillis = 30_000) },
+                            ).awaitAll()
 
                             // Every stream must have closed. A stream left open is a consumer
                             // suspended forever, which is the hang this design removes.

@@ -79,6 +79,22 @@ impl Pending {
     }
 }
 
+// A successful creation owns its handle until poll transfers it to the JVM. This also covers
+// results discarded by cancellation, a closed queue, or an undrained queue being dropped.
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self.status != crate::abi::KT_OK || self.aux0 == 0 {
+            return;
+        }
+        let kind = match self.kind {
+            KtKind::ClientConnected => crate::handle::KIND_CLIENT,
+            KtKind::EphemeralStarted => crate::handle::KIND_EPHEMERAL,
+            _ => return,
+        };
+        let _ = crate::handle::HANDLES.remove_of_kind(self.aux0, kind);
+    }
+}
+
 /// Scratch space a poller reuses for the payloads of one batch.
 ///
 /// Grown on demand and never shrunk, so steady state is allocation-free. The previous bridge paid
@@ -286,7 +302,7 @@ impl PollerEntry {
             let closed = state.closed;
             (state.queue.drain(..take).collect::<Vec<_>>(), closed)
         };
-        let (drained, closed) = drained;
+        let (mut drained, closed) = drained;
 
         if drained.is_empty() {
             // Closed and empty must be an error: Ok(0) here would have the pump loop spin at
@@ -306,7 +322,7 @@ impl PollerEntry {
                 .resize(total.next_power_of_two().max(64 * 1024), 0);
         }
 
-        for (index, pending) in drained.iter().enumerate() {
+        for (index, pending) in drained.iter_mut().enumerate() {
             let (ptr, len) = if pending.payload.is_empty() {
                 (0, 0)
             } else {
@@ -322,6 +338,8 @@ impl PollerEntry {
                 aux1: pending.aux1,
             };
             unsafe { out.add(index).write(record) };
+            // The caller now owns any resource carried in this completion.
+            pending.aux0 = 0;
         }
         Ok(drained.len() as u32)
     }

@@ -4,6 +4,9 @@ import com.surrealdev.temporal.core.TemporalCoreException
 import io.temporal.api.workflowservice.v1.DescribeNamespaceRequest
 import io.temporal.api.workflowservice.v1.DescribeNamespaceResponse
 import io.temporal.api.workflowservice.v1.StartWorkflowExecutionRequest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
@@ -92,6 +95,37 @@ class KtClientIntegrationTest {
                     assertFailsWith<TemporalCoreException> {
                         KtClient.connect(runtime, clientOptions("127.0.0.1:1"))
                     }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `cancellation after a success is dispatched releases the client handle`() {
+        val address =
+            address() ?: run {
+                println("skipping: set TEMPORAL_TEST_ADDRESS to run this against a dev server")
+                return
+            }
+        KtRuntime.create().use { runtime ->
+            runBlocking {
+                KtClient.connect(runtime, clientOptions(address)).use { client ->
+                    val ready = java.util.ArrayDeque<Runnable>()
+                    val dispatcher =
+                        java.util.concurrent
+                            .Executor { ready.add(it) }
+                            .asCoroutineDispatcher()
+                    var reqId = 0L
+                    val waiter = async(dispatcher) { runtime.pump.request { reqId = it } }
+                    ready.removeFirst().run()
+                    // Transfer a real native resource, then cancel before the dispatcher delivers it.
+                    runtime.pump.dispatch(
+                        Completion(reqId, Kind.CLIENT_CONNECTED, KtBridge.KT_OK, ByteArray(0), client.handle, 0),
+                    )
+                    waiter.cancel()
+                    ready.removeFirst().run()
+                    assertFailsWith<CancellationException> { waiter.await() }
+                    assertEquals(KtBridge.KT_ERR_STALE_HANDLE, KtBridge.clientFree(client.handle))
                 }
             }
         }

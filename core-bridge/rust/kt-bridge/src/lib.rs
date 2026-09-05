@@ -17,10 +17,12 @@ pub mod client;
 pub mod ephemeral;
 pub mod error;
 pub mod handle;
+pub mod jvm_slots;
 pub mod panic;
 pub mod queue;
 pub mod rpc;
 pub mod runtime;
+pub mod telemetry;
 pub mod worker;
 
 /// Generated from `proto/kt_bridge.proto`.
@@ -149,16 +151,28 @@ kt_export! {
 }
 
 kt_export! {
+    /// Drains a MetricBatch, preserving it across BUFFER_TOO_SMALL retries.
+    fn kt_runtime_retrieve_metrics(runtime: u64, out: *mut u8, cap: u32, out_len: *mut u32) {
+        let entry = HANDLES.runtime(runtime)?;
+        let mut pending = entry.metric_batch.lock();
+        let bytes = pending.get_or_insert_with(|| prost::Message::encode_to_vec(&runtime::drain_metrics(&entry)));
+        unsafe { write_out(bytes, out, cap, out_len) }?;
+        *pending = None;
+        Ok(())
+    }
+}
+
+kt_export! {
     /// Terminal. Answers every outstanding request with `KT_ERR_SHUTDOWN` and wakes all pollers,
     /// so no JVM continuation is left waiting for a completion that will never arrive.
     fn kt_runtime_free(runtime: u64) {
-        match HANDLES.remove_of_kind(runtime, handle::KIND_RUNTIME)? {
-            Entry::Runtime(entry) => {
-                runtime::free_runtime(entry);
-                Ok(())
-            }
-            _ => Err(KtError::WrongHandleKind),
+        let (entry, children) = HANDLES.remove_runtime(runtime)?;
+        // Keep Core alive until every child has stopped. Drop no resources under the table lock.
+        runtime::free_runtime(entry.clone());
+        for child in children {
+            child.close();
         }
+        Ok(())
     }
 }
 
@@ -176,19 +190,21 @@ kt_export! {
         }
         let entry = HANDLES.runtime(runtime)?;
         let config: proto::ClientOptions = prost::Message::decode(unsafe { slice(cfg, cfg_len) }?)?;
-        let options = client::connection_options(&config)?;
+        let mut options = client::connection_options(&config)?;
+        options.metrics_meter = entry.core.telemetry().get_temporal_metric_meter();
         let namespace = config.namespace.clone();
 
         runtime::spawn_request(&entry, req_id, async move {
             match client::connect(options, namespace).await {
                 Ok(client) => {
-                    let handle = HANDLES.insert(Entry::Client(client));
-                    queue::Pending::ack(req_id).kind(KtKind::ClientConnected).aux0(handle)
+                    match HANDLES.insert_owned(runtime, Entry::Client(client)) {
+                        Ok(handle) => queue::Pending::ack(req_id).kind(KtKind::ClientConnected).aux0(handle),
+                        Err(error) => queue::Pending::error(req_id, error.code(), error.to_string()),
+                    }
                 }
-                Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
+                Err(error) => client::connect_failure(req_id, error),
             }
-        });
-        Ok(())
+        })
     }
 }
 
@@ -212,6 +228,7 @@ kt_export! {
             return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
         }
         let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(client, runtime)?;
         let cl = HANDLES.client(client)?;
         // 0 means no deadline. Callers that long-poll set one and expect DEADLINE_EXCEEDED when
         // the window elapses, which is how they tell "nothing happened yet" from a real failure.
@@ -230,12 +247,12 @@ kt_export! {
                 // A gRPC error is reported with the server's own status code, so the JVM can
                 // raise the exception the server intended rather than a generic failure.
                 Ok(outcome) => queue::Pending::error(req_id, outcome.status_code, outcome.message)
-                    .kind(KtKind::Rpc),
+                    .kind(KtKind::Rpc)
+                    .payload(outcome.payload),
                 Err(err) => queue::Pending::error(req_id, err.code(), err.to_string())
                     .kind(KtKind::Rpc),
             }
-        });
-        Ok(())
+        })
     }
 }
 
@@ -257,9 +274,13 @@ kt_export! {
             return Err(KtError::InvalidArgument("out_worker is null".into()));
         }
         let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(client, runtime)?;
         let cl = HANDLES.client(client)?;
         let options: proto::WorkerOptions = prost::Message::decode(unsafe { slice(cfg, cfg_len) }?)?;
-        let config = worker::worker_config(&options)?;
+        let resources = options.resource_tuner.as_ref()
+            .is_some_and(|tuner| tuner.jvm_resource_based)
+            .then(|| std::sync::Arc::new(jvm_slots::ResourceGate::new()));
+        let config = worker::worker_config_with_resource_gate(&options, resources.clone())?;
 
         // init_worker constructs long-poll buffers that spawn onto the reactor, so it needs a
         // full runtime context. `Handle::enter()` only sets the thread-local handle and proved
@@ -279,12 +300,13 @@ kt_export! {
             .block_on(core.validate())
             .map_err(|e| KtError::InvalidArgument(format!("worker validation failed: {e}")))?;
 
-        let entry = std::sync::Arc::new(worker::WorkerEntry::new(
+        let mut entry = worker::WorkerEntry::new(
             std::sync::Arc::new(core),
             rt.sender(),
             rt.core.tokio_handle().clone(),
-        ));
-        let handle = HANDLES.insert(Entry::Worker(entry));
+        );
+        entry.resources = resources;
+        let handle = HANDLES.insert_owned(runtime, Entry::Worker(std::sync::Arc::new(entry)))?;
         unsafe { out_worker.write(handle) };
         Ok(())
     }
@@ -295,6 +317,7 @@ kt_export! {
     /// in `aux0` and the stream kind in `aux1`. Idempotent.
     fn kt_worker_start(runtime: u64, worker: u64) {
         let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(worker, runtime)?;
         let entry = HANDLES.worker(worker)?;
         worker::start(&entry, &rt, worker)
     }
@@ -314,6 +337,7 @@ kt_export! {
             return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
         }
         let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(worker, runtime)?;
         let entry = HANDLES.worker(worker)?;
         let core = entry.core()?;
         let bytes = unsafe { slice(proto_bytes, proto_len) }?.to_vec();
@@ -323,8 +347,7 @@ kt_export! {
                 Ok(()) => queue::Pending::ack(req_id),
                 Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
             }
-        });
-        Ok(())
+        })
     }
 }
 
@@ -368,6 +391,7 @@ kt_export! {
             return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
         }
         let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(worker, runtime)?;
         let entry = HANDLES.worker(worker)?;
         let grace = std::time::Duration::from_millis(grace_millis.max(1));
 
@@ -376,8 +400,7 @@ kt_export! {
                 Ok(()) => queue::Pending::ack(req_id),
                 Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
             }
-        });
-        Ok(())
+        })
     }
 }
 
@@ -385,23 +408,27 @@ kt_export! {
     fn kt_worker_free(worker: u64) {
         let removed = HANDLES.remove_of_kind(worker, handle::KIND_WORKER)?;
         if let Entry::Worker(entry) = removed {
-            // Freed without a shutdown: the three detached pumps would otherwise keep polling
-            // Core forever, receiving tasks nobody is listening for. Tell Core to stop so they
-            // exit on ShutDown and drop the last references. Not a graceful finalize -- that is
-            // what kt_worker_shutdown is for -- but never a leak.
-            let core = {
-                let mut guard = entry.state.lock();
-                match std::mem::replace(&mut *guard, worker::WorkerState::Finalized) {
-                    worker::WorkerState::Running { core, .. }
-                    | worker::WorkerState::Draining { core } => Some(core),
-                    worker::WorkerState::Finalized => None,
-                }
-            };
-            if let Some(core) = core {
-                let _guard = entry.tokio.enter();
-                core.initiate_shutdown();
-            }
+            worker::free(&entry);
         }
+        Ok(())
+    }
+}
+
+kt_export! {
+    /// Updates per-kind resource admission from the JVM sampler (workflow, activity, local, nexus).
+    fn kt_worker_update_resource(worker: u64, allow: u32, out_stats: *mut u32) {
+        if out_stats.is_null() {
+            return Err(KtError::InvalidArgument("out_stats is null".into()));
+        }
+        if allow > 15 {
+            return Err(KtError::InvalidArgument("resource admission mask must be between 0 and 15".into()));
+        }
+        let entry = HANDLES.worker(worker)?;
+        entry.core()?;
+        let gate = entry.resources.as_ref()
+            .ok_or_else(|| KtError::InvalidArgument("worker has no JVM resource tuner".into()))?;
+        gate.update(allow);
+        unsafe { ptr::copy_nonoverlapping(gate.stats().as_ptr(), out_stats, 8) };
         Ok(())
     }
 }
@@ -424,16 +451,16 @@ kt_export! {
             match ephemeral::start(options).await {
                 Ok(server) => {
                     let info = server.info();
-                    let handle = HANDLES.insert(Entry::Ephemeral(server));
-                    queue::Pending::ack(req_id)
-                        .kind(KtKind::EphemeralStarted)
-                        .aux0(handle)
-                        .payload(prost::Message::encode_to_vec(&info))
+                    match HANDLES.insert_owned(runtime, Entry::Ephemeral(server)) {
+                        Ok(handle) => queue::Pending::ack(req_id)
+                            .kind(KtKind::EphemeralStarted).aux0(handle)
+                            .payload(prost::Message::encode_to_vec(&info)),
+                        Err(error) => queue::Pending::error(req_id, error.code(), error.to_string()),
+                    }
                 }
                 Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
             }
-        });
-        Ok(())
+        })
     }
 }
 
@@ -453,20 +480,20 @@ kt_export! {
             return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
         }
         let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(server, runtime)?;
         let entry = HANDLES.ephemeral(server)?;
         runtime::spawn_request(&rt, req_id, async move {
             match entry.shutdown().await {
                 Ok(()) => queue::Pending::ack(req_id),
                 Err(message) => queue::Pending::error(req_id, KT_ERR_FAILED, message),
             }
-        });
-        Ok(())
+        })
     }
 }
 
 kt_export! {
     fn kt_ephemeral_free(server: u64) {
-        HANDLES.remove_of_kind(server, handle::KIND_EPHEMERAL)?;
+        HANDLES.remove_of_kind(server, handle::KIND_EPHEMERAL)?.close();
         Ok(())
     }
 }

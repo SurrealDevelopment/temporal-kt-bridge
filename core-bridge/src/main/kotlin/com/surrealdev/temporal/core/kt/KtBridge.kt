@@ -62,6 +62,15 @@ internal object KtBridge {
     private val abiProbe = handle("kt_abi_probe", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))
     private val lastErrorFn = handle("kt_last_error", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))
 
+    init {
+        checkAbi()
+    }
+
+    private val retrieveMetricsFn =
+        handle("kt_runtime_retrieve_metrics", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS))
+    private val updateResourceFn =
+        handle("kt_worker_update_resource", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, ADDRESS))
+
     private val runtimeNewFn =
         handle("kt_runtime_new", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS))
     private val runtimeFreeFn = handle("kt_runtime_free", FunctionDescriptor.of(JAVA_INT, JAVA_LONG))
@@ -147,11 +156,6 @@ internal object KtBridge {
     private val ephemeralFreeFn =
         handle("kt_ephemeral_free", FunctionDescriptor.of(JAVA_INT, JAVA_LONG))
 
-    init {
-        // Must run after every handle above is bound: Kotlin initialises in declaration order.
-        checkAbi()
-    }
-
     /**
      * Fails at class-init if the native library's layout is not what this file reads it with.
      *
@@ -168,7 +172,7 @@ internal object KtBridge {
             val expected =
                 intArrayOf(
                     0x4B544231,
-                    1,
+                    2,
                     RECORD_BYTES.toInt(),
                     O_REQ_ID.toInt(),
                     O_KIND.toInt(),
@@ -219,6 +223,35 @@ internal object KtBridge {
             val out = outHandle(arena)
             check(runtimeNewFn.invokeExact(arena.bytes(config), config.size, out) as Int, "kt_runtime_new")
             out.get(JAVA_LONG, 0)
+        }
+
+    fun retrieveMetrics(runtime: Long): ByteArray {
+        var cap = 65536
+        while (true) {
+            Arena.ofConfined().use { arena ->
+                val out = arena.allocate(cap.toLong())
+                val outLen = arena.allocate(JAVA_INT)
+                val status = retrieveMetricsFn.invokeExact(runtime, out, cap, outLen) as Int
+                val size = outLen.get(JAVA_INT, 0)
+                if (status == KT_ERR_BUFFER_TOO_SMALL) {
+                    check(size > cap) { "Invalid telemetry buffer size $size" }
+                    cap = size
+                } else {
+                    check(status, "kt_runtime_retrieve_metrics")
+                    return out.asSlice(0, size.toLong()).toArray(JAVA_BYTE)
+                }
+            }
+        }
+    }
+
+    fun updateResource(
+        worker: Long,
+        allowMask: Int,
+    ): IntArray =
+        Arena.ofConfined().use { arena ->
+            val stats = arena.allocate(JAVA_INT, 8)
+            check(updateResourceFn.invokeExact(worker, allowMask, stats) as Int, "kt_worker_update_resource")
+            IntArray(8) { stats.get(JAVA_INT, it * 4L) }
         }
 
     fun runtimeFree(runtime: Long): Int = runtimeFreeFn.invokeExact(runtime) as Int

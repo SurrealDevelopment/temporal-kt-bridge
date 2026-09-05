@@ -25,8 +25,10 @@ internal class KtEphemeralServer private constructor(
     @Volatile
     private var shutDown = false
 
+    val runtimeClosed: Boolean get() = runtime.isClosed()
+
     suspend fun shutdown() {
-        if (shutDown) return
+        if (shutDown || runtimeClosed) return
         val completion =
             runtime.pump.request { reqId ->
                 KtBridge.ephemeralShutdown(runtime.handle, handle, reqId)

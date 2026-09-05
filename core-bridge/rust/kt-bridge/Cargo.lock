@@ -1009,12 +1009,15 @@ name = "kt-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures-util",
  "gethostname",
+ "opentelemetry",
  "parking_lot",
  "prost",
  "prost-build",
  "prost-wkt-types",
+ "serde_json",
  "temporalio-client",
  "temporalio-common",
  "temporalio-sdk-core",

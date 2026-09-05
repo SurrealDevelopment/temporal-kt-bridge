@@ -12,9 +12,6 @@ import java.util.concurrent.ConcurrentHashMap
  * fails anything still registered. The C bridge instead blocked on a 60-second latch here,
  * because it had no guarantee a callback would ever arrive.
  *
- * There is no metrics-bridge parameter. Core's own Prometheus and OTLP exporters replace the
- * C bridge's eight custom-meter upcalls, which ran on Tokio threads and had to be wrapped in
- * blanket `catch (Throwable)` to keep an exception from crossing the FFI boundary.
  */
 internal class KtRuntime private constructor(
     val handle: Long,
@@ -29,7 +26,17 @@ internal class KtRuntime private constructor(
 
     private fun onPushed(completion: Completion) {
         when (completion.kind) {
-            Kind.SERVER_LOG, Kind.LOG -> Unit // wired up with log forwarding
+            Kind.SERVER_LOG -> {
+                val log =
+                    com.surrealdev.temporal.core.proto.ServerLogLine
+                        .parseFrom(completion.payload)
+                val logger = org.slf4j.LoggerFactory.getLogger("temporal.server")
+                if (log.stderr) logger.warn(log.line) else logger.info(log.line)
+            }
+            Kind.LOG ->
+                org.slf4j.LoggerFactory
+                    .getLogger("temporal.core")
+                    .warn(completion.errorMessage())
             else -> pushedHandlers[completion.aux0]?.invoke(completion)
         }
     }
@@ -45,6 +52,8 @@ internal class KtRuntime private constructor(
     fun removeWorkerEvents(worker: Long) {
         pushedHandlers.remove(worker)
     }
+
+    fun isClosed(): Boolean = closed
 
     fun ensureOpen() {
         check(!closed) { "Runtime has been closed" }

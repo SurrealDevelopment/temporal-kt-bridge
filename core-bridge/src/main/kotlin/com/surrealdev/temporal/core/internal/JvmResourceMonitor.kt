@@ -37,6 +37,7 @@ class JvmResourceMonitor(
     private val sampleTask: ScheduledFuture<*>
 
     init {
+        sample()
         sampleTask =
             executor.scheduleAtFixedRate(
                 ::sample,
@@ -109,8 +110,8 @@ class JvmResourceMonitor(
 
     private fun sampleCpu(): Double {
         val bean = osMxBean ?: return 0.0
-        val load = bean.cpuLoad
-        // getCpuLoad() returns -1.0 when data is unavailable (e.g., first call)
+        val load = bean.processCpuLoad
+        // getProcessCpuLoad() returns -1.0 when data is unavailable (e.g., first call)
         if (load < 0.0) return 0.0
         return load.coerceIn(0.0, 1.0)
     }

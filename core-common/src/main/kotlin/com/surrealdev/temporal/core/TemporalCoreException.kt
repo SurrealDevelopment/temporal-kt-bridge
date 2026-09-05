@@ -6,11 +6,6 @@ package com.surrealdev.temporal.core
  * This exception wraps errors that originate from the Rust side of the FFI boundary.
  *
  * @param writableStackTrace Whether to capture a stack trace at construction.
- *   Constructions on native (FFM upcall) callback threads MUST pass false: the trace
- *   is meaningless there (it shows the Rust callback thread, not user code), and the
- *   JVM's stack walk over upcall stub frames has proven crash-prone (SIGSEGV in
- *   `Throwable.fillInStackTrace` on macOS aarch64). Callers on normal JVM threads can
- *   keep the default.
  */
 class TemporalCoreException(
     message: String,
@@ -18,6 +13,8 @@ class TemporalCoreException(
     val statusCode: Int? = null,
     cause: Throwable? = null,
     writableStackTrace: Boolean = true,
+    /** The server's grpc-status-details-bin bytes, if this was a gRPC rejection. */
+    val details: ByteArray? = null,
 ) : RuntimeException(message, cause, true, writableStackTrace) {
     override fun toString(): String =
         buildString {

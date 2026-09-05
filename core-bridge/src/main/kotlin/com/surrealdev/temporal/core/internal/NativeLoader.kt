@@ -17,6 +17,8 @@ import java.nio.file.Path
  */
 object NativeLoader {
     private const val LIB_NAME = "kt_bridge"
+    private const val SUPPORTED_CLASSIFIERS =
+        "linux-x86_64-gnu, linux-aarch64-gnu, linux-x86_64-musl, linux-aarch64-musl, macos-aarch64, windows-x86_64"
 
     /** System property naming an explicit library to load instead of one from the classpath. */
     private const val LIBRARY_PATH_PROPERTY = "temporal.native.libraryPath"
@@ -106,24 +108,16 @@ object NativeLoader {
                     Native library not found for platform: $${platform.resourceDir}
 
                     Add the platform-specific dependency. Note that core-bridge is versioned as
-                    <sdk-core version>-<temporal-kt version>, so it does NOT share the version of
+                    <sdk-core version>-<bridge version>, so it does NOT share the version of
                     com.surrealdev.temporal:core -- use the version below verbatim.
 
                     Directly, for this platform:
                       runtimeOnly("com.surrealdev.temporal:core-bridge:$${BuildConfig.BRIDGE_VERSION}:$${platform.mavenClassifier}")
 
-                    Gradle (with osdetector, to pick the classifier automatically):
-                      plugins { id("com.google.osdetector") version "1.7.3" }
-                      dependencies {
-                        implementation("com.surrealdev.temporal:core-bridge:$${BuildConfig.BRIDGE_VERSION}")
-                        val nativeClassifier = if (osdetector.os == "linux") "${osdetector.classifier}-gnu" else osdetector.classifier
-                        runtimeOnly("com.surrealdev.temporal:core-bridge:$${BuildConfig.BRIDGE_VERSION}:$nativeClassifier")
-                      }
-
                     Simplest: apply the com.surrealdev.temporal Gradle plugin and use `temporal { native() }`,
                     which resolves the matching classifier for you.
 
-                    Supported classifiers: linux-x86_64-gnu, linux-aarch64-gnu, macos-aarch64, windows-x86_64
+                    Supported classifiers: $${SUPPORTED_CLASSIFIERS}
                     """.trimIndent(),
                 )
 
@@ -164,29 +158,27 @@ object NativeLoader {
      */
     fun getLibraryPath(): Path? = libraryPath
 
-    private fun detectPlatform(): Platform {
-        val osName = System.getProperty("os.name").lowercase()
-        val arch = System.getProperty("os.arch").lowercase()
-
-        // Detect Linux libc variant (glibc vs musl)
-        // Default to glibc; musl is typically used in Alpine Linux
-        val isMusl = osName.contains("linux") && detectMuslLibc()
-
+    internal fun detectPlatform(
+        osName: String = System.getProperty("os.name"),
+        arch: String = System.getProperty("os.arch"),
+        isMusl: Boolean = osName.contains("linux", ignoreCase = true) && detectMuslLibc(),
+    ): Platform {
+        val normalizedOs = osName.lowercase()
         val os =
             when {
-                osName.contains("mac") || osName.contains("darwin") -> {
+                normalizedOs.contains("mac") || normalizedOs.contains("darwin") -> {
                     OS.MACOS
                 }
 
-                osName.contains("linux") && isMusl -> {
+                normalizedOs.contains("linux") && isMusl -> {
                     OS.LINUXMUSL
                 }
 
-                osName.contains("linux") -> {
+                normalizedOs.contains("linux") -> {
                     OS.LINUXGNU
                 }
 
-                osName.contains("windows") -> {
+                normalizedOs.contains("windows") -> {
                     OS.WINDOWS
                 }
 
@@ -196,12 +188,18 @@ object NativeLoader {
             }
 
         val architecture =
-            when (arch) {
+            when (arch.lowercase()) {
                 "aarch64", "arm64" -> Arch.AARCH64
                 "amd64", "x86_64" -> Arch.X86_64
                 else -> throw IllegalStateException("Unsupported architecture: $arch")
             }
 
+        check(
+            (os != OS.MACOS || architecture == Arch.AARCH64) &&
+                (os != OS.WINDOWS || architecture == Arch.X86_64),
+        ) {
+            "Unsupported platform: $osName ($arch). Supported classifiers: $SUPPORTED_CLASSIFIERS"
+        }
         return Platform(os, architecture)
     }
 
@@ -218,19 +216,19 @@ object NativeLoader {
         return lib.list()?.any { it.startsWith("ld-musl-") && it.endsWith(".so.1") } == true
     }
 
-    private enum class OS {
+    internal enum class OS {
         MACOS,
         LINUXGNU,
         LINUXMUSL,
         WINDOWS,
     }
 
-    private enum class Arch {
+    internal enum class Arch {
         X86_64,
         AARCH64,
     }
 
-    private data class Platform(
+    internal data class Platform(
         val os: OS,
         val arch: Arch,
     ) {
@@ -251,13 +249,7 @@ object NativeLoader {
          * Use this when declaring the runtimeOnly dependency.
          */
         val mavenClassifier: String
-            get() =
-                when (os) {
-                    OS.MACOS -> "macos-${arch.name.lowercase()}"
-                    OS.LINUXGNU -> "linux-${arch.name.lowercase()}-gnu"
-                    OS.LINUXMUSL -> "linux-${arch.name.lowercase()}-musl"
-                    OS.WINDOWS -> "windows-${arch.name.lowercase()}"
-                }
+            get() = resourceDir
 
         fun libFileName(baseName: String): String =
             when (os) {

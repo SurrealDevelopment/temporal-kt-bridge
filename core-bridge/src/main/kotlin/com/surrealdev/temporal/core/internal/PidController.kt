@@ -1,7 +1,7 @@
 package com.surrealdev.temporal.core.internal
 
 /**
- * Used by [CustomSlotSupplierBridge] to make adaptive slot grant decisions
+ * Used by the JVM resource sampler to make adaptive slot grant decisions
  * based on JVM resource usage. A positive output indicates resources are
  * below the setpoint (safe to grant); negative means over the setpoint.
  **

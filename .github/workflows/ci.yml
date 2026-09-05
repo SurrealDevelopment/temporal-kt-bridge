@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**']
@@ -8,7 +9,7 @@ on:
     paths-ignore: ['**.md', 'docs/**']
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -37,9 +38,20 @@ jobs:
           rustflags: ""
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      - name: Verify dependency version pins
+        run: python3 .github/scripts/check-versions.py
+
       - name: clippy (kt-bridge)
         working-directory: core-bridge/rust/kt-bridge
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Verify generated RPC dispatch
+        working-directory: core-bridge/rust/kt-bridge
+        run: |
+          client_manifest=$(cargo metadata --locked --format-version=1 | python3 -c 'import json,sys; print(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "temporalio-client"))')
+          python3 tools/generate_rpc_table.py "$(dirname "$client_manifest")/src/grpc.rs"
+          rustfmt --edition 2024 src/rpc.rs
+          git diff --exit-code -- src/rpc.rs
 
       - name: cargo test (kt-bridge)
         working-directory: core-bridge/rust/kt-bridge
@@ -217,7 +229,7 @@ jobs:
             fi
           done
           for so in $(find "${{ matrix.artifact-path }}" -name '*.so' -path '*-musl/*'); do
-            if objdump -T "$so" | grep -q 'GLIBC_'; then
+            if objdump -T "$so" | grep 'GLIBC_' > /dev/null; then
               echo "ERROR: musl library $so references glibc symbols"; fail=1
             fi
             echo "$so: no glibc symbols (musl)"

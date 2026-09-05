@@ -7,7 +7,7 @@ use temporalio_client::GrpcCompression;
 use temporalio_client::{ClientTlsOptions, TlsOptions};
 use temporalio_client::{Connection, ConnectionOptions};
 
-use crate::error::{KtError, KtResult};
+use crate::error::{KtError, KtResult, grpc_status_code};
 
 pub struct ClientEntry {
     pub connection: Connection,
@@ -29,18 +29,6 @@ pub fn connection_options(config: &crate::proto::ClientOptions) -> KtResult<Conn
     // cannot be applied conditionally with reassignment. The `maybe_*` setters take an Option and
     // keep the chain in one expression.
     //
-    // client-name / client-version go on every RPC as headers. Core would otherwise stamp its
-    // own ("temporal-rust" / the Core crate version), and servers key behaviour on these: the Java
-    // time-skipping test server answers a woken long poll for an unrecognised client with a bare
-    // UNKNOWN. Sent through the headers map because the dedicated setters are gated behind Core's
-    // `core-based-sdk` feature; the header interceptor honours a value that is already present.
-    let mut headers = std::collections::HashMap::new();
-    if !config.client_name.is_empty() {
-        headers.insert("client-name".to_string(), config.client_name.clone());
-    }
-    if !config.client_version.is_empty() {
-        headers.insert("client-version".to_string(), config.client_version.clone());
-    }
     // Any TLS field, or the bare flag, turns TLS on. An https:// target with tls_options None is
     // refused by tonic outright, which is how the previous version of this made Temporal Cloud
     // unreachable while every local test kept passing.
@@ -73,7 +61,16 @@ pub fn connection_options(config: &crate::proto::ClientOptions) -> KtResult<Conn
 
     Ok(ConnectionOptions::new(target)
         .maybe_tls_options(tls_options)
-        .maybe_headers((!headers.is_empty()).then_some(headers))
+        .client_name(if config.client_name.is_empty() {
+            "temporal-kotlin"
+        } else {
+            &config.client_name
+        })
+        .client_version(if config.client_version.is_empty() {
+            env!("CARGO_PKG_VERSION")
+        } else {
+            &config.client_version
+        })
         // Defaulted rather than required: Core rejects an empty identity when a worker is built,
         // and failing there is a confusing place to learn that a client option was missing.
         .identity(default_identity(&config.identity))
@@ -113,13 +110,31 @@ fn default_identity(configured: &str) -> String {
 pub async fn connect(
     options: ConnectionOptions,
     namespace: String,
-) -> Result<Arc<ClientEntry>, String> {
-    match Connection::connect(options).await {
-        Ok(connection) => Ok(Arc::new(ClientEntry {
+) -> Result<Arc<ClientEntry>, temporalio_client::errors::ClientConnectError> {
+    Connection::connect(options).await.map(|connection| {
+        Arc::new(ClientEntry {
             connection,
             namespace,
-        })),
-        Err(err) => Err(format!("{err:#}")),
+        })
+    })
+}
+
+pub fn connect_failure(
+    req_id: u64,
+    error: temporalio_client::errors::ClientConnectError,
+) -> crate::queue::Pending {
+    match error {
+        temporalio_client::errors::ClientConnectError::SystemInfoCallError(status) => {
+            crate::queue::Pending::error(req_id, grpc_status_code(&status), status.message())
+                .kind(crate::abi::KtKind::ClientConnected)
+                .payload(prost::Message::encode_to_vec(&crate::proto::RpcFailure {
+                    message: status.message().to_string(),
+                    details: status.details().to_vec(),
+                }))
+        }
+        error => {
+            crate::queue::Pending::error(req_id, crate::abi::KT_ERR_FAILED, format!("{error:#}"))
+        }
     }
 }
 
@@ -133,6 +148,34 @@ mod tls_tests {
             namespace: "ns".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn connecting_preserves_server_status_and_details() {
+        let status = tonic::Status::with_details(
+            tonic::Code::Unauthenticated,
+            "expired token",
+            b"details".as_slice().into(),
+        );
+        let result = connect_failure(
+            42,
+            temporalio_client::errors::ClientConnectError::SystemInfoCallError(status),
+        );
+        assert_eq!(result.status, 16);
+        let failure: crate::proto::RpcFailure =
+            prost::Message::decode(result.payload.as_slice()).unwrap();
+        assert_eq!(failure.message, "expired token");
+        assert_eq!(failure.details, b"details");
+    }
+
+    #[test]
+    fn connecting_reports_local_system_info_timeout_as_deadline_exceeded() {
+        let status = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        let result = connect_failure(
+            42,
+            temporalio_client::errors::ClientConnectError::SystemInfoCallError(status),
+        );
+        assert_eq!(result.status, tonic::Code::DeadlineExceeded as i32);
     }
 
     #[test]

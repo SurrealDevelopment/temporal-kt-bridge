@@ -17,10 +17,12 @@ crate-type = ["cdylib", "rlib"]
 # C-bridge fork patched is reachable through Core's public Rust API (see src/ephemeral.rs and
 # src/worker.rs), so the patches are unnecessary rather than merely carried elsewhere.
 temporalio-sdk-core = { version = "0.8", features = ["ephemeral-server", "otel"] }
-temporalio-client = "0.8"
+temporalio-client = { version = "0.8", features = ["core-based-sdk"] }
 temporalio-common = { version = "0.8", features = ["core-based-sdk", "otel"] }
 
 anyhow = "1"
+async-trait = "0.1"
+opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
 # The same crate SDK-Core uses for this; $HOSTNAME is a shell variable, not an exported one,
 # so reading the environment yields nothing on macOS and in most containers.
 gethostname = "1"
@@ -33,6 +35,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 tokio-util = "0.7"
 tonic = { version = "0.14", default-features = false }
 tracing = "0.1"
+serde_json = "1"
 url = "2"
 
 [build-dependencies]

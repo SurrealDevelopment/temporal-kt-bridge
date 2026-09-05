@@ -41,13 +41,22 @@ worker is a `WorkerState::Finalized` variant with no field to unwrap.
 ```
 
 Requires a Rust toolchain matching `rust/kt-bridge/rust-toolchain.toml` and `protoc`. Cross
-targets must be installed (`rustup target add ...`); the toolchain file lists them.
+targets must be installed for the pinned toolchain (`rustup target add ...` from `rust/kt-bridge`).
 
-To run the JVM against a library you built by hand, skip packaging entirely:
+From the repository root, run JVM tests against a library you built by hand:
 
 ```bash
-./gradlew :core-bridge:test -Dtemporal.native.libraryPath=$PWD/rust/kt-bridge/target/release/libkt_bridge.dylib
+TEMPORAL_KT_NATIVE_LIB=$PWD/core-bridge/rust/kt-bridge/target/release/libkt_bridge.dylib ./gradlew :core-bridge:test
 ```
+
+## Resource tuning and telemetry
+
+`SlotSupplier.JvmResourceBased` samples JVM heap and process CPU usage in Kotlin; Rust owns slot
+permits, queue wakeups, and ramp throttling. Each task type keeps its own tuning configuration.
+
+`TemporalRuntime.create(coreMetricsMeter = meter)` forwards Core worker and client metrics into the
+application's OpenTelemetry Meter. Configure exporters through that application's OpenTelemetry
+provider. Core warnings and errors are forwarded to SLF4J loggers named after their native targets.
 
 ## Updating SDK-Core
 
@@ -66,5 +75,7 @@ dispatch arm. `tools/generate_rpc_table.py` reads the `proxier!` blocks out of t
 TestService:
 
 ```bash
-python3 rust/kt-bridge/tools/generate_rpc_table.py
+cd core-bridge/rust/kt-bridge
+python3 tools/generate_rpc_table.py ~/.cargo/registry/src/*/temporalio-client-0.8.0/src/grpc.rs
+rustfmt --edition 2024 src/rpc.rs
 ```

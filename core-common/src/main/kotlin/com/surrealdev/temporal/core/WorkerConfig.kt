@@ -44,18 +44,21 @@ data class WorkerConfig(
     /**
      * Poller behavior for workflow tasks. Controls how many concurrent gRPC long-polls are
      * issued to the Temporal server for workflow activations.
+     * Null lets Core select behavior using the namespace autoscaling capability.
      */
-    val workflowPollerBehavior: CorePollerBehavior = CorePollerBehavior.SimpleMaximum(5),
+    val workflowPollerBehavior: CorePollerBehavior? = CorePollerBehavior.SimpleMaximum(5),
     /**
      * Poller behavior for activity tasks. Controls how many concurrent gRPC long-polls are
      * issued to the Temporal server for activity tasks.
+     * Null lets Core select behavior using the namespace autoscaling capability.
      */
-    val activityPollerBehavior: CorePollerBehavior = CorePollerBehavior.SimpleMaximum(5),
+    val activityPollerBehavior: CorePollerBehavior? = CorePollerBehavior.SimpleMaximum(5),
     /**
      * Poller behavior for nexus tasks. Controls how many concurrent gRPC long-polls are
      * issued to the Temporal server for nexus tasks.
+     * Null lets Core select behavior using the namespace autoscaling capability.
      */
-    val nexusPollerBehavior: CorePollerBehavior = CorePollerBehavior.SimpleMaximum(2),
+    val nexusPollerBehavior: CorePollerBehavior? = CorePollerBehavior.SimpleMaximum(2),
     /**
      * Maximum number of activities per second this worker will execute, regardless of task queue
      * capacity. Use to protect downstream services from burst load. 0.0 means no limit.
@@ -82,8 +85,8 @@ data class WorkerConfig(
     val nondeterminismAsWorkflowFail: Boolean = false,
     /**
      * Workflow type names for which nondeterminism errors should be reported as workflow
-     * failures (overrides [nondeterminismAsWorkflowFail] for the listed types when that
-     * flag is false, and can also be used to opt specific types out when the flag is true).
+     * failures in addition to the global [nondeterminismAsWorkflowFail] setting.
+     * This list cannot opt types out of a global failure policy.
      *
      * Default: empty (no per-type overrides)
      */
@@ -137,9 +140,9 @@ data class WorkerConfig(
      * Grace period in milliseconds after shutdown is initiated before the Core SDK
      * auto-cancels outstanding activities and nexus operations.
      *
-     * Default: 0 (immediate cancellation at Core level).
+     * Default: 0 (immediate cancellation at Core level). Null disables Core cancellation.
      */
-    val gracefulShutdownPeriodMs: Long = 0L,
+    val gracefulShutdownPeriodMs: Long? = 0L,
     /**
      * Build ID identifying this worker build, sent to the server in heartbeats
      * and visible in the Temporal UI. Only used when no deployment options are configured.

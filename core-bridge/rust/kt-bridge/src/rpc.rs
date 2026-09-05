@@ -14,14 +14,13 @@
 //! trip.
 
 use temporalio_client::Connection;
-// The service traits are not imported: methods are called on the returned
-// `Box<dyn WorkflowService>` etc., which is the trait object itself.
+use temporalio_client::grpc::{OperatorService, TestService, WorkflowService};
 use temporalio_common::protos::temporal::api::{
     operatorservice::v1::*, testservice::v1::*, workflowservice::v1::*,
 };
 use tonic::Request;
 
-use crate::error::{KtError, KtResult};
+use crate::error::{KtError, KtResult, grpc_status_code};
 
 /// Which gRPC service an RPC belongs to. Mirrors the JVM-side enum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,12 +54,8 @@ pub struct RpcOutcome {
 
 /// Bounds a call with a client-side deadline, reporting DEADLINE_EXCEEDED when it elapses.
 ///
-/// Deliberately NOT `Request::set_timeout`. That sends a `grpc-timeout` header, so the server
-/// enforces the deadline as well and the two race: tonic's own timer yields CANCELLED, while a
-/// server that cancels its handler answers with whatever its framework makes of that -- grpc-java
-/// (the time-skipping test server) sends UNKNOWN with no message. Dropping the future instead
-/// resets the h2 stream, which the server sees as a plain cancellation with nothing to answer, and
-/// the caller gets the one code that means "the window elapsed".
+/// This outer timeout covers every retry. The request also carries a timeout so Core's default
+/// 30-second per-attempt deadline does not shorten an explicitly longer call.
 async fn with_deadline<T>(
     timeout: Option<std::time::Duration>,
     call: impl std::future::Future<Output = Result<T, tonic::Status>>,
@@ -105,7 +100,10 @@ macro_rules! dispatch {
                 $name => {
                     let decoded: $req = prost::Message::decode($bytes)
                         .map_err(|e| KtError::InvalidArgument(format!("{} request: {e}", $name)))?;
-                    let request = Request::new(decoded);
+                    let mut request = Request::new(decoded);
+                    if let Some(timeout) = $timeout {
+                        request.set_timeout(timeout);
+                    }
                     match with_deadline($timeout, $client.$method(request)).await {
                         Ok(response) => Ok(RpcOutcome {
                             payload: prost::Message::encode_to_vec(&response.into_inner()),
@@ -113,8 +111,11 @@ macro_rules! dispatch {
                             message: String::new(),
                         }),
                         Err(status) => Ok(RpcOutcome {
-                            payload: Vec::new(),
-                            status_code: status.code() as i32,
+                            payload: prost::Message::encode_to_vec(&crate::proto::RpcFailure {
+                                message: status_message(&status),
+                                details: status.details().to_vec(),
+                            }),
+                            status_code: grpc_status_code(&status),
                             message: status_message(&status),
                         }),
                     }
@@ -132,7 +133,7 @@ async fn call_workflow_service(
     bytes: &[u8],
     timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
-    let mut client = connection.workflow_service();
+    let mut client = connection.clone();
     dispatch!(client, rpc, bytes, timeout, {
         "RegisterNamespace" => register_namespace(RegisterNamespaceRequest),
         "DescribeNamespace" => describe_namespace(DescribeNamespaceRequest),
@@ -267,7 +268,7 @@ async fn call_operator_service(
     bytes: &[u8],
     timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
-    let mut client = connection.operator_service();
+    let mut client = connection.clone();
     dispatch!(client, rpc, bytes, timeout, {
         "AddSearchAttributes" => add_search_attributes(AddSearchAttributesRequest),
         "RemoveSearchAttributes" => remove_search_attributes(RemoveSearchAttributesRequest),
@@ -290,7 +291,7 @@ async fn call_test_service(
     bytes: &[u8],
     timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
-    let mut client = connection.test_service();
+    let mut client = connection.clone();
     if let Some(outcome) = call_test_service_unit(&mut client, rpc, timeout).await? {
         return Ok(outcome);
     }
@@ -305,14 +306,16 @@ async fn call_test_service(
 
 /// Unit-request RPCs on TestService: nothing to decode, so they bypass `dispatch!`.
 async fn call_test_service_unit(
-    client: &mut Box<dyn temporalio_client::grpc::TestService>,
+    client: &mut Connection,
     rpc: &str,
     timeout: Option<std::time::Duration>,
 ) -> KtResult<Option<RpcOutcome>> {
+    let mut request = Request::new(());
+    if let Some(timeout) = timeout {
+        request.set_timeout(timeout);
+    }
     let result = match rpc {
-        "GetCurrentTime" => {
-            Some(with_deadline(timeout, client.get_current_time(Request::new(()))).await)
-        }
+        "GetCurrentTime" => Some(with_deadline(timeout, client.get_current_time(request)).await),
         _ => None,
     };
     Ok(result.map(|r| match r {
@@ -322,8 +325,11 @@ async fn call_test_service_unit(
             message: String::new(),
         },
         Err(status) => RpcOutcome {
-            payload: Vec::new(),
-            status_code: status.code() as i32,
+            payload: prost::Message::encode_to_vec(&crate::proto::RpcFailure {
+                message: status_message(&status),
+                details: status.details().to_vec(),
+            }),
+            status_code: grpc_status_code(&status),
             message: status_message(&status),
         },
     }))

@@ -29,10 +29,6 @@ use crate::error::{KtError, KtResult};
 
 pub struct EphemeralEntry {
     server: Mutex<Option<EphemeralServer>>,
-    /// The runtime the server was started on. Drop needs it: kt_ephemeral_free from a JVM thread
-    /// has no current Tokio context, and `Handle::try_current()` there would silently skip the
-    /// shutdown and orphan the child process.
-    tokio: tokio::runtime::Handle,
     /// Captured at start so it stays readable after shutdown consumes the server.
     ///
     /// The C bridge read it straight off the server, which is why its accessor was documented as
@@ -58,20 +54,10 @@ impl EphemeralEntry {
             None => Ok(()), // idempotent
         }
     }
-}
 
-/// Shuts the child down if the entry is dropped without an explicit shutdown, so an unwound or
-/// forgotten path cannot leak a server process.
-///
-/// Best-effort and detached: `Drop` cannot await, and blocking here would stall whichever thread
-/// released the last reference.
-impl Drop for EphemeralEntry {
-    fn drop(&mut self) {
-        if let Some(mut server) = self.server.lock().take() {
-            self.tokio.spawn(async move {
-                let _ = server.shutdown().await;
-            });
-        }
+    /// Core's kill_on_drop stops the child even if another operation still holds this entry.
+    pub fn free(&self) {
+        self.server.lock().take();
     }
 }
 
@@ -107,11 +93,12 @@ fn exe(options: &crate::proto::EphemeralServerOptions) -> EphemeralExe {
 pub async fn start(
     options: crate::proto::EphemeralServerOptions,
 ) -> Result<Arc<EphemeralEntry>, String> {
+    let port = port(&options).map_err(|e| e.to_string())?;
     let (out, err) = redirect(&options)?;
     let server = if options.test_server {
         let config = TestServerConfig::builder()
             .exe(exe(&options))
-            .maybe_port(port(&options))
+            .maybe_port(port)
             .extra_args(options.extra_args.clone())
             .build();
         config.start_server_with_output(out, err).await
@@ -128,7 +115,7 @@ pub async fn start(
             } else {
                 options.ip.clone()
             })
-            .maybe_port(port(&options))
+            .maybe_port(port)
             .ui(options.ui)
             .extra_args(options.extra_args.clone())
             .build();
@@ -142,16 +129,16 @@ pub async fn start(
 
     Ok(Arc::new(EphemeralEntry {
         server: Mutex::new(Some(server)),
-        // Constructed inside a spawned request, so a runtime is current here.
-        tokio: tokio::runtime::Handle::current(),
         pid,
         target,
         has_test_service,
     }))
 }
 
-fn port(options: &crate::proto::EphemeralServerOptions) -> Option<u16> {
-    (options.port > 0 && options.port <= u16::MAX as u32).then_some(options.port as u16)
+fn port(options: &crate::proto::EphemeralServerOptions) -> KtResult<Option<u16>> {
+    let port = u16::try_from(options.port)
+        .map_err(|_| KtError::InvalidArgument("port must be between 0 and 65535".into()))?;
+    Ok((port > 0).then_some(port))
 }
 
 /// Where the child's output goes.
@@ -175,5 +162,67 @@ fn redirect(
 }
 
 pub fn decode_options(bytes: &[u8]) -> KtResult<crate::proto::EphemeralServerOptions> {
-    prost::Message::decode(bytes).map_err(KtError::from)
+    let options: crate::proto::EphemeralServerOptions = prost::Message::decode(bytes)?;
+    port(&options)?;
+    Ok(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        abi::{KtCompletion, KtKind},
+        handle::{Entry, HANDLES, KIND_EPHEMERAL},
+        queue::{Pending, Queue},
+    };
+
+    #[test]
+    fn a_port_outside_the_tcp_range_is_rejected_instead_of_selecting_a_random_port() {
+        let options = crate::proto::EphemeralServerOptions {
+            port: 65_536,
+            ..Default::default()
+        };
+        assert!(matches!(
+            decode_options(&prost::Message::encode_to_vec(&options)),
+            Err(KtError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn an_unclaimed_server_completion_releases_its_handle_but_poll_transfers_ownership() {
+        let new_handle = || {
+            HANDLES.insert(Entry::Ephemeral(Arc::new(EphemeralEntry {
+                // A stopped server still has a live bridge handle; no process is needed to test ownership.
+                server: Mutex::new(None),
+                pid: 1,
+                target: String::new(),
+                has_test_service: false,
+            })))
+        };
+        let result = |handle| Pending::ack(1).kind(KtKind::EphemeralStarted).aux0(handle);
+
+        let handle = new_handle();
+        drop(result(handle));
+        assert!(HANDLES.ephemeral(handle).is_err());
+
+        let queue = Queue::new();
+        let handle = new_handle();
+        queue.sender().push(result(handle));
+        let poller = queue.poller();
+        let mut out = std::mem::MaybeUninit::<KtCompletion>::uninit();
+        assert_eq!(unsafe { poller.poll(out.as_mut_ptr(), 1, 0) }.unwrap(), 1);
+        assert!(HANDLES.ephemeral(handle).is_ok());
+        HANDLES.remove_of_kind(handle, KIND_EPHEMERAL).unwrap();
+
+        queue.close();
+        let handle = new_handle();
+        queue.sender().push(result(handle));
+        assert!(HANDLES.ephemeral(handle).is_err());
+
+        let queued = Queue::new();
+        let handle = new_handle();
+        queued.sender().push(result(handle));
+        drop(queued);
+        assert!(HANDLES.ephemeral(handle).is_err());
+    }
 }

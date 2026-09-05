@@ -4,7 +4,6 @@ import com.google.protobuf.CodedInputStream
 import com.google.protobuf.MessageLite
 import com.surrealdev.temporal.core.kt.KtTaskKind
 import com.surrealdev.temporal.core.kt.KtWorker
-import kotlin.concurrent.write
 
 /**
  * A high-level wrapper for a Temporal Core worker.
@@ -70,8 +69,10 @@ class TemporalWorker private constructor(
                     WorkerOptionsProto.encode(taskQueue, namespace, config),
                 )
             try {
+                runtime.registerResourceWorker(worker.handle, config)
                 worker.start()
             } catch (t: Throwable) {
+                runtime.removeResourceWorker(worker.handle)
                 worker.close()
                 throw t
             }
@@ -79,7 +80,12 @@ class TemporalWorker private constructor(
         }
     }
 
-    fun isClosed(): Boolean = closed
+    /** Observes JVM tuning decisions and slot counts on the runtime sampler thread. */
+    fun onSlotSupplierMetrics(callback: ((SlotSupplierMetrics) -> Unit)?) {
+        runtime.onResourceMetrics(kt.handle, callback)
+    }
+
+    fun isClosed(): Boolean = closed || runtime.isClosed()
 
     fun isShutdownInitiated(): Boolean = shutdownInitiated
 
@@ -103,7 +109,7 @@ class TemporalWorker private constructor(
         receive(kt.nexusTaskStream, parser)
 
     private suspend fun <T : MessageLite> receive(
-        stream: kotlinx.coroutines.channels.ReceiveChannel<ByteArray>,
+        stream: com.surrealdev.temporal.core.kt.TaskStream,
         parser: (CodedInputStream) -> T,
     ): T? =
         try {
@@ -172,200 +178,230 @@ class TemporalWorker private constructor(
         synchronized(this) {
             if (closed) return
             closed = true
+            runtime.removeResourceWorker(kt.handle)
             kt.close()
         }
     }
 }
 
-private fun SlotSupplier.fixedSlotsOrZero(): Int = (this as? SlotSupplier.FixedSize)?.slots ?: 0
-
-private class ProtoBuf {
-    private val out = java.io.ByteArrayOutputStream()
-
-    private fun varint(value: Long) {
-        var v = value
-        while (v and 0x7FL.inv() != 0L) {
-            out.write(((v and 0x7F) or 0x80).toInt())
-            v = v ushr 7
-        }
-        out.write(v.toInt())
-    }
-
-    fun double(
-        number: Int,
-        value: Double,
-    ) = apply {
-        out.write((number shl 3) or 1)
-        var bits = java.lang.Double.doubleToLongBits(value)
-        repeat(8) {
-            out.write((bits and 0xFF).toInt())
-            bits = bits ushr 8
-        }
-    }
-
-    fun uint(
-        number: Int,
-        value: Long,
-    ) = apply {
-        if (value > 0) {
-            out.write((number shl 3) or 0)
-            varint(value)
-        }
-    }
-
-    fun bytes(): ByteArray = out.toByteArray()
-}
-
-/**
- * The shared PID targets and gains, or null when this supplier is not resource-based.
- *
- * Fixed-width doubles rather than varints: a gain of 0.0 is meaningful (it is `i_gain`'s default),
- * so these fields cannot be skipped the way a zero-valued varint is.
- */
-@Suppress("DEPRECATION")
-private fun SlotSupplier.resourceTargets(): ByteArray? =
-    when (this) {
-        is SlotSupplier.FixedSize -> null
-        is SlotSupplier.JvmResourceBased ->
-            ProtoBuf()
-                .double(1, targetMemoryUsage)
-                .double(2, targetCpuUsage)
-                .double(3, pidTuning.memoryPGain)
-                .double(4, pidTuning.memoryIGain)
-                .double(5, pidTuning.memoryDGain)
-                .double(6, pidTuning.memoryOutputThreshold)
-                .double(7, pidTuning.cpuPGain)
-                .double(8, pidTuning.cpuIGain)
-                .double(9, pidTuning.cpuDGain)
-                .double(10, pidTuning.cpuOutputThreshold)
-                .bytes()
-        // CGroupResourceBased carried no PID knobs, so Core's defaults apply. The JVM-heap vs
-        // system-memory distinction the two variants drew disappears here: Core samples the
-        // system (cgroup-aware) either way, which is why JvmResourceBased is the survivor.
-        is SlotSupplier.CGroupResourceBased ->
-            ProtoBuf()
-                .double(1, targetMemoryUsage)
-                .double(2, targetCpuUsage)
-                .double(3, 5.0)
-                .double(4, 0.0)
-                .double(5, 1.0)
-                .double(6, 0.25)
-                .double(7, 5.0)
-                .double(8, 0.0)
-                .double(9, 1.0)
-                .double(10, 0.05)
-                .bytes()
-    }
-
-/** This slot type's own bounds, or null when it is fixed-size. */
-@Suppress("DEPRECATION")
-private fun SlotSupplier.resourceLimits(): ByteArray? =
-    when (this) {
-        is SlotSupplier.FixedSize -> null
-        is SlotSupplier.JvmResourceBased ->
-            ProtoBuf()
-                .uint(1, minimumSlots.toLong())
-                .uint(2, maximumSlots.toLong())
-                .uint(3, rampThrottleMs)
-                .bytes()
-        is SlotSupplier.CGroupResourceBased ->
-            ProtoBuf()
-                .uint(1, minimumSlots.toLong())
-                .uint(2, maximumSlots.toLong())
-                .uint(3, rampThrottleMs)
-                .bytes()
-    }
-
-/** Encodes `kt_bridge.WorkerOptions` by hand: the bridge's own config protos are not published. */
+/** The generated schema is shared with Rust, including presence for meaningful zero values. */
 internal object WorkerOptionsProto {
     fun encode(
         taskQueue: String,
         namespace: String,
         config: WorkerConfig,
     ): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
+        require(taskQueue.isNotBlank()) { "taskQueue must not be blank" }
+        require(namespace.isNotBlank()) { "namespace must not be blank" }
+        require(config.maxCachedWorkflows >= 0) { "maxCachedWorkflows must be nonnegative" }
+        require(config.enableWorkflows || !config.enableLocalActivities) {
+            "Local activities require workflows to be enabled"
+        }
+        require(config.enableWorkflows || config.enableActivities || config.enableNexus) {
+            "At least one task type must be enabled"
+        }
+        require(config.maxHeartbeatThrottleIntervalMs >= 0) { "maxHeartbeatThrottleIntervalMs must be nonnegative" }
+        require(
+            config.defaultHeartbeatThrottleIntervalMs >= 0,
+        ) { "defaultHeartbeatThrottleIntervalMs must be nonnegative" }
+        require(
+            config.stickyQueueScheduleToStartTimeoutMs >= 0,
+        ) { "stickyQueueScheduleToStartTimeoutMs must be nonnegative" }
+        require((config.gracefulShutdownPeriodMs ?: 0) >= 0) {
+            "gracefulShutdownPeriodMs must be nonnegative"
+        }
+        require(config.maxActivitiesPerSecond.isFinite() && config.maxActivitiesPerSecond >= 0) {
+            "maxActivitiesPerSecond must be finite and nonnegative"
+        }
+        require(config.maxTaskQueueActivitiesPerSecond.isFinite() && config.maxTaskQueueActivitiesPerSecond >= 0) {
+            "maxTaskQueueActivitiesPerSecond must be finite and nonnegative"
+        }
+        require(config.nonstickyToStickyPollRatio.isFinite() && config.nonstickyToStickyPollRatio in 0f..1f) {
+            "nonstickyToStickyPollRatio must be between 0 and 1"
+        }
+        require(config.maxEagerActivityReservationsPerWorkflowTask >= 0) {
+            "maxEagerActivityReservationsPerWorkflowTask must be nonnegative"
+        }
+        require(config.nondeterminismAsWorkflowFailForTypes.all { it.isNotBlank() }) {
+            "nondeterminismAsWorkflowFailForTypes must contain nonblank workflow type names"
+        }
+        val options =
+            com.surrealdev.temporal.core.proto.WorkerOptions
+                .newBuilder()
+                .setNamespace(namespace)
+                .setTaskQueue(taskQueue)
+                .setIdentity(config.workerIdentity.orEmpty())
+                .setMaxCachedWorkflows(config.maxCachedWorkflows)
+                .setBuildId(config.buildId)
+                .setNoRemoteActivities(!config.enableActivities)
+                .setNoWorkflows(!config.enableWorkflows)
+                .setNoLocalActivities(!config.enableLocalActivities)
+                .setEnableNexus(config.enableNexus)
+                .setMaxHeartbeatThrottleIntervalMillis(config.maxHeartbeatThrottleIntervalMs)
+                .setDefaultHeartbeatThrottleIntervalMillis(config.defaultHeartbeatThrottleIntervalMs)
+                .setMaxActivitiesPerSecond(config.maxActivitiesPerSecond)
+                .setMaxTaskQueueActivitiesPerSecond(config.maxTaskQueueActivitiesPerSecond)
+                .setNonstickyToStickyPollRatio(config.nonstickyToStickyPollRatio)
+                .setStickyQueueScheduleToStartTimeoutMillis(config.stickyQueueScheduleToStartTimeoutMs)
+                .setNondeterminismAsWorkflowFail(config.nondeterminismAsWorkflowFail)
+                .addAllNondeterminismAsWorkflowFailForTypes(config.nondeterminismAsWorkflowFailForTypes)
+                .setMaxEagerActivityReservationsPerWorkflowTask(config.maxEagerActivityReservationsPerWorkflowTask)
+                .setDisablePayloadErrorLimit(config.disablePayloadErrorLimit)
 
-        fun varint(value: Int) {
-            var v = value
-            while (v >= 0x80) {
-                out.write((v and 0x7F) or 0x80)
-                v = v ushr 7
+        config.gracefulShutdownPeriodMs?.let(options::setGracefulShutdownPeriodMillis)
+        config.deploymentOptions?.let { deployment ->
+            require(
+                deployment.useWorkerVersioning ||
+                    deployment.defaultVersioningBehavior == VersioningBehavior.UNSPECIFIED,
+            ) {
+                "defaultVersioningBehavior requires useWorkerVersioning"
             }
-            out.write(v)
-        }
-
-        fun string(
-            number: Int,
-            value: String,
-        ) {
-            if (value.isEmpty()) return
-            val bytes = value.toByteArray(Charsets.UTF_8)
-            out.write((number shl 3) or 2)
-            varint(bytes.size)
-            out.write(bytes)
-        }
-
-        fun int(
-            number: Int,
-            value: Int,
-        ) {
-            if (value <= 0) return
-            out.write((number shl 3) or 0)
-            varint(value)
-        }
-
-        fun bool(
-            number: Int,
-            value: Boolean,
-        ) {
-            if (!value) return
-            out.write((number shl 3) or 0)
-            out.write(1)
-        }
-
-        fun message(
-            number: Int,
-            body: ByteArray,
-        ) {
-            out.write((number shl 3) or 2)
-            varint(body.size)
-            out.write(body)
-        }
-        string(1, namespace)
-        string(2, taskQueue)
-        // Empty means the bridge derives <pid>@<hostname>, so this is the worker's override only.
-        string(3, config.workerIdentity ?: "")
-        int(4, config.maxCachedWorkflows)
-        // Versioning itself is not wired through yet; the build id is still worth sending so
-        // history shows which build ran a task.
-        string(9, config.deploymentOptions?.version?.buildId ?: "")
-
-        // Negated on the wire so proto3's false default means "enabled".
-        bool(8, !config.enableActivities)
-        bool(14, !config.enableWorkflows)
-        bool(15, !config.enableLocalActivities)
-
-        // Fixed slot counts. A resource-based supplier leaves these at 0 and sends limits below.
-        int(5, config.workflowSlotSupplier.fixedSlotsOrZero())
-        int(6, config.activitySlotSupplier.fixedSlotsOrZero())
-        int(7, config.localActivitySlotSupplier.fixedSlotsOrZero())
-
-        // Resource-based tuning is Core's own supplier now. The previous bridge ran the identical
-        // algorithm in the JVM -- same PID gains, same defaults -- behind seven FFM upcalls sitting
-        // in front of every poll, so moving it into Rust costs nothing but the upcalls.
-        //
-        // Core shares one controller across a worker's slot types, so the targets and gains are
-        // taken from whichever supplier is resource-based (they are the same object in every
-        // realistic configuration) while each slot type sends its own limits. A slot type left
-        // fixed sends none and stays fixed.
-        val suppliers =
-            listOf(
-                11 to config.workflowSlotSupplier,
-                12 to config.activitySlotSupplier,
-                13 to config.localActivitySlotSupplier,
+            options.setDeploymentOptions(
+                com.surrealdev.temporal.core.proto.WorkerDeploymentOptions
+                    .newBuilder()
+                    .setDeploymentName(deployment.version.deploymentName)
+                    .setBuildId(deployment.version.buildId)
+                    .setUseWorkerVersioning(deployment.useWorkerVersioning)
+                    .setDefaultVersioningBehavior(deployment.defaultVersioningBehavior.value),
             )
-        suppliers.firstNotNullOfOrNull { (_, s) -> s.resourceTargets() }?.let { message(10, it) }
-        suppliers.forEach { (field, supplier) -> supplier.resourceLimits()?.let { message(field, it) } }
-        return out.toByteArray()
+        }
+        config.workflowPollerBehavior?.let {
+            if (it is CorePollerBehavior.SimpleMaximum && config.maxCachedWorkflows > 0) {
+                require(it.maximum >= 2) { "Cached workflows require at least 2 workflow pollers" }
+            }
+            options.setWorkflowPollerBehavior(it.toProto())
+        }
+        config.activityPollerBehavior?.let { options.setActivityPollerBehavior(it.toProto()) }
+        config.nexusPollerBehavior?.let { options.setNexusPollerBehavior(it.toProto()) }
+
+        var sharedTargets: com.surrealdev.temporal.core.proto.ResourceBasedTuner? = null
+
+        fun supplier(
+            supplier: SlotSupplier,
+            setFixed: (Int) -> Unit,
+            setResource: (com.surrealdev.temporal.core.proto.ResourceSlotLimits) -> Unit,
+        ) {
+            if (supplier is SlotSupplier.FixedSize) {
+                require(supplier.slots > 0) { "Fixed slot counts must be positive" }
+                setFixed(supplier.slots)
+                return
+            }
+            val targets = supplier.resourceTargets()
+            require(sharedTargets == null || sharedTargets?.jvmResourceBased == targets.jvmResourceBased) {
+                "JVM and system resource suppliers cannot be mixed in one worker"
+            }
+            require(targets.jvmResourceBased || sharedTargets == null || sharedTargets == targets) {
+                "System resource suppliers in one worker must share memory/CPU targets and PID tuning"
+            }
+            sharedTargets = targets
+            setResource(supplier.resourceLimits())
+        }
+        if (config.maxCachedWorkflows > 0 && config.enableWorkflows) {
+            require(config.workflowSlotSupplier.maxConcurrent >= 2) {
+                "Cached workflows require at least 2 workflow slots"
+            }
+        }
+        supplier(config.workflowSlotSupplier, {
+            options.setMaxConcurrentWorkflowTasks(it)
+        }, { options.setWorkflowResourceLimits(it) })
+        supplier(config.activitySlotSupplier, {
+            options.setMaxConcurrentActivities(it)
+        }, { options.setActivityResourceLimits(it) })
+        supplier(config.localActivitySlotSupplier, {
+            options.setMaxConcurrentLocalActivities(it)
+        }, { options.setLocalActivityResourceLimits(it) })
+        supplier(
+            config.nexusSlotSupplier,
+            { options.setMaxConcurrentNexusTasks(it) },
+            { options.setNexusResourceLimits(it) },
+        )
+        sharedTargets?.let(options::setResourceTuner)
+        return options.build().toByteArray()
     }
+}
+
+private fun CorePollerBehavior.toProto(): com.surrealdev.temporal.core.proto.PollerBehavior {
+    val builder =
+        com.surrealdev.temporal.core.proto.PollerBehavior
+            .newBuilder()
+    when (this) {
+        is CorePollerBehavior.SimpleMaximum -> {
+            require(maximum > 0) { "SimpleMaximum poller maximum must be positive" }
+            builder.setSimpleMaximum(maximum)
+        }
+        is CorePollerBehavior.Autoscaling -> {
+            require(minimum > 0 && maximum >= minimum && initial in minimum..maximum) {
+                "Autoscaling requires 0 < minimum <= initial <= maximum"
+            }
+            builder.setAutoscaling(
+                com.surrealdev.temporal.core.proto.PollerAutoscaling
+                    .newBuilder()
+                    .setMinimum(minimum)
+                    .setMaximum(maximum)
+                    .setInitial(initial),
+            )
+        }
+    }
+    return builder.build()
+}
+
+@Suppress("DEPRECATION")
+private fun SlotSupplier.asResource(): SlotSupplier.JvmResourceBased =
+    when (this) {
+        is SlotSupplier.JvmResourceBased -> this
+        is SlotSupplier.CGroupResourceBased ->
+            SlotSupplier.JvmResourceBased(targetMemoryUsage, targetCpuUsage, minimumSlots, maximumSlots, rampThrottleMs)
+        is SlotSupplier.FixedSize -> error("Fixed suppliers do not have resource options")
+    }
+
+private fun SlotSupplier.resourceTargets(): com.surrealdev.temporal.core.proto.ResourceBasedTuner {
+    val resource = asResource()
+    require(resource.targetMemoryUsage.isFinite() && resource.targetMemoryUsage in 0.0..1.0) {
+        "targetMemoryUsage must be between 0 and 1"
+    }
+    require(resource.targetCpuUsage.isFinite() && resource.targetCpuUsage in 0.0..1.0) {
+        "targetCpuUsage must be between 0 and 1"
+    }
+    with(resource.pidTuning) {
+        require(
+            listOf(
+                memoryPGain,
+                memoryIGain,
+                memoryDGain,
+                memoryOutputThreshold,
+                cpuPGain,
+                cpuIGain,
+                cpuDGain,
+                cpuOutputThreshold,
+            ).all { it.isFinite() },
+        ) { "Resource PID gains and thresholds must be finite" }
+        return com.surrealdev.temporal.core.proto.ResourceBasedTuner
+            .newBuilder()
+            .setJvmResourceBased(this@resourceTargets is SlotSupplier.JvmResourceBased)
+            .setTargetMemoryUsage(resource.targetMemoryUsage)
+            .setTargetCpuUsage(resource.targetCpuUsage)
+            .setMemoryPGain(memoryPGain)
+            .setMemoryIGain(memoryIGain)
+            .setMemoryDGain(memoryDGain)
+            .setMemoryOutputThreshold(memoryOutputThreshold)
+            .setCpuPGain(cpuPGain)
+            .setCpuIGain(cpuIGain)
+            .setCpuDGain(cpuDGain)
+            .setCpuOutputThreshold(cpuOutputThreshold)
+            .build()
+    }
+}
+
+private fun SlotSupplier.resourceLimits(): com.surrealdev.temporal.core.proto.ResourceSlotLimits {
+    val resource = asResource()
+    require(resource.minimumSlots >= 0 && resource.maximumSlots > 0 && resource.minimumSlots <= resource.maximumSlots) {
+        "Resource slots require 0 <= minimumSlots <= maximumSlots and maximumSlots > 0"
+    }
+    require(resource.rampThrottleMs >= 0) { "Resource rampThrottleMs must be nonnegative" }
+    return com.surrealdev.temporal.core.proto.ResourceSlotLimits
+        .newBuilder()
+        .setMinimumSlots(resource.minimumSlots)
+        .setMaximumSlots(resource.maximumSlots)
+        .setRampThrottleMillis(resource.rampThrottleMs)
+        .build()
 }

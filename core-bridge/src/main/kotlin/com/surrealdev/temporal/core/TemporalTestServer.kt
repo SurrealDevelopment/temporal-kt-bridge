@@ -64,9 +64,17 @@ class TemporalTestServer private constructor(
      * Null after [close] on purpose: the process is gone, and the OS is free to hand that number
      * to something else.
      */
-    override val pid: Long? get() = if (closed || shutDown) null else kt.pid.takeIf { it > 0 }?.toLong()
+    override val pid: Long? get() =
+        if (closed ||
+            shutDown ||
+            kt.runtimeClosed
+        ) {
+            null
+        } else {
+            kt.pid.takeIf { it > 0 }?.toLong()
+        }
 
-    override fun isClosed(): Boolean = closed
+    override fun isClosed(): Boolean = closed || kt.runtimeClosed
 
     companion object {
         @Suppress("LongParameterList", "UNUSED_PARAMETER")

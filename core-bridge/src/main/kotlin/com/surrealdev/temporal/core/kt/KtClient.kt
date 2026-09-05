@@ -1,6 +1,7 @@
 package com.surrealdev.temporal.core.kt
 
 import com.surrealdev.temporal.core.TemporalCoreException
+import com.surrealdev.temporal.core.proto.RpcFailure
 
 /** The gRPC services the bridge can dispatch to. Must match `Service` in rpc.rs. */
 internal enum class KtService(
@@ -34,18 +35,21 @@ internal class KtClient(
         request: ByteArray,
         timeoutMillis: Long = 0,
     ): ByteArray {
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
         runtime.ensureOpen()
         val completion =
             runtime.pump.request { reqId ->
                 KtBridge.clientRpc(runtime.handle, handle, service.code, rpc, request, timeoutMillis, reqId)
             }
         if (completion.isFailure) {
+            val failure = if (completion.status > 0) RpcFailure.parseFrom(completion.payload) else null
             throw TemporalCoreException(
-                message = "$rpc failed: ${completion.errorMessage()}",
+                message = "$rpc failed: ${failure?.message ?: completion.errorMessage()}",
                 errorType = null,
                 statusCode = completion.status,
                 cause = null,
                 writableStackTrace = true,
+                details = failure?.details?.toByteArray(),
             )
         }
         return completion.payload
@@ -65,12 +69,14 @@ internal class KtClient(
             val completion =
                 runtime.pump.request { reqId -> KtBridge.clientConnect(runtime.handle, config, reqId) }
             if (completion.isFailure) {
+                val failure = if (completion.status > 0) RpcFailure.parseFrom(completion.payload) else null
                 throw TemporalCoreException(
-                    message = "could not connect: ${completion.errorMessage()}",
+                    message = "could not connect: ${failure?.message ?: completion.errorMessage()}",
                     errorType = null,
                     statusCode = completion.status,
                     cause = null,
                     writableStackTrace = true,
+                    details = failure?.details?.toByteArray(),
                 )
             }
             return KtClient(runtime, completion.aux0)

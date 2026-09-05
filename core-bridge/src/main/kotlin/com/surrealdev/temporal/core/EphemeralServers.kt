@@ -126,15 +126,28 @@ object EphemeralServers {
         if (shutdownHookInstalled.compareAndSet(false, true)) {
             Runtime.getRuntime().addShutdownHook(Thread(::closeAll, "temporal-ephemeral-server-cleanup"))
         }
-        val record = server.pid?.let { ProcessRecord.of(it) }
-        if (record == null) {
-            logger.debug("Ephemeral server {} has no observable pid; not recorded for orphan reaping", server.targetUrl)
-            return
-        }
         synchronized(recordsLock) {
+            // A start may finish wrapping its result after the owning runtime has closed.
+            if (server.isClosed()) {
+                live.remove(server)
+                return
+            }
+            val record = server.pid?.let { ProcessRecord.of(it) }
+            if (record == null) {
+                logger.debug(
+                    "Ephemeral server {} has no observable pid; not recorded for orphan reaping",
+                    server.targetUrl,
+                )
+                return
+            }
             records[server] = record
             writeOwnRecords()
         }
+    }
+
+    /** Runtime closure invalidates its servers before their wrappers are individually closed. */
+    internal fun unregisterClosed() {
+        live.toList().filter { it.isClosed() }.forEach(::unregister)
     }
 
     internal fun unregister(server: EphemeralServer) {

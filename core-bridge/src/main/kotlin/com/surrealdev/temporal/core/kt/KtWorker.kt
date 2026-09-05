@@ -2,7 +2,10 @@ package com.surrealdev.temporal.core.kt
 
 import com.surrealdev.temporal.core.TemporalCoreException
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /** Which task stream a completion belongs to. Must match `TaskKind` in worker.rs. */
 internal enum class KtTaskKind(
@@ -15,6 +18,43 @@ internal enum class KtTaskKind(
 
     companion object {
         fun fromAux(aux1: Long): KtTaskKind? = entries.firstOrNull { it.code.toLong() == aux1 }
+    }
+}
+
+/** Cancellation only consumes a wakeup; a task stays queued until receive actually returns. */
+internal class TaskStream {
+    private val tasks = ConcurrentLinkedQueue<ByteArray>()
+    private val ready = Channel<Unit>(Channel.CONFLATED)
+
+    @Volatile
+    private var closed = false
+
+    fun send(task: ByteArray) {
+        if (closed) return
+        tasks.add(task)
+        ready.trySend(Unit)
+    }
+
+    fun close(cause: Throwable? = null) {
+        closed = true
+        ready.close(cause)
+    }
+
+    suspend fun receive(): ByteArray {
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            tasks.poll()?.let { task ->
+                // Another receiver may already be waiting after observing the queue empty.
+                if (tasks.isNotEmpty()) ready.trySend(Unit)
+                return task
+            }
+            val wakeup = ready.receiveCatching()
+            if (wakeup.isClosed) {
+                // A final task can be enqueued between the empty check and stream closure.
+                tasks.poll()?.let { return it }
+                throw wakeup.exceptionOrNull() ?: ClosedReceiveChannelException("task stream closed")
+            }
+        }
     }
 }
 
@@ -35,23 +75,27 @@ internal class KtWorker private constructor(
     private val runtime: KtRuntime,
     val handle: Long,
 ) : AutoCloseable {
-    private val workflowActivations = Channel<ByteArray>(Channel.UNLIMITED)
-    private val activityTasks = Channel<ByteArray>(Channel.UNLIMITED)
-    private val nexusTasks = Channel<ByteArray>(Channel.UNLIMITED)
+    private val workflowActivations = TaskStream()
+    private val activityTasks = TaskStream()
+    private val nexusTasks = TaskStream()
+    private val streamFailures = arrayOfNulls<TemporalCoreException>(KtTaskKind.entries.size)
 
     @Volatile
     private var closed = false
 
-    val workflowActivationStream: ReceiveChannel<ByteArray> get() = workflowActivations
-    val activityTaskStream: ReceiveChannel<ByteArray> get() = activityTasks
-    val nexusTaskStream: ReceiveChannel<ByteArray> get() = nexusTasks
+    val workflowActivationStream: TaskStream get() = workflowActivations
+    val activityTaskStream: TaskStream get() = activityTasks
+    val nexusTaskStream: TaskStream get() = nexusTasks
 
     private fun onEvent(completion: Completion) {
         when (completion.kind) {
-            Kind.TASK_WORKFLOW_ACTIVATION -> workflowActivations.trySend(completion.payload)
-            Kind.TASK_ACTIVITY -> activityTasks.trySend(completion.payload)
-            Kind.TASK_NEXUS -> nexusTasks.trySend(completion.payload)
-            Kind.TASK_STREAM_END -> channelFor(completion.aux1)?.close()
+            Kind.TASK_WORKFLOW_ACTIVATION -> workflowActivations.send(completion.payload)
+            Kind.TASK_ACTIVITY -> activityTasks.send(completion.payload)
+            Kind.TASK_NEXUS -> nexusTasks.send(completion.payload)
+            Kind.TASK_STREAM_END ->
+                KtTaskKind.fromAux(completion.aux1)?.let { kind ->
+                    channelFor(completion.aux1)?.close(streamFailures[kind.code])
+                }
             Kind.WORKER_FAILED -> {
                 // aux1 names the stream, so the right consumer is unblocked rather than all of
                 // them being left waiting on a worker that is no longer polling.
@@ -63,13 +107,15 @@ internal class KtWorker private constructor(
                         cause = null,
                         writableStackTrace = true,
                     )
-                channelFor(completion.aux1)?.close(failure)
+                // Keep accepting shutdown activations/tasks until the stream ends. Dropping them
+                // would strand the Core slots that shutdown is waiting to release.
+                KtTaskKind.fromAux(completion.aux1)?.let { streamFailures[it.code] = failure }
             }
             else -> Unit
         }
     }
 
-    private fun channelFor(aux1: Long): Channel<ByteArray>? =
+    private fun channelFor(aux1: Long): TaskStream? =
         when (KtTaskKind.fromAux(aux1)) {
             KtTaskKind.WORKFLOW_ACTIVATION -> workflowActivations
             KtTaskKind.ACTIVITY -> activityTasks
@@ -157,7 +203,6 @@ internal class KtWorker private constructor(
                     KtBridge.workerShutdown(runtime.handle, handle, graceMillis, reqId)
                 }
             }
-        closed = true
         if (completion.isFailure) {
             throw TemporalCoreException(
                 message = "worker shutdown failed: ${completion.errorMessage()}",
@@ -167,6 +212,7 @@ internal class KtWorker private constructor(
                 writableStackTrace = true,
             )
         }
+        closed = true
     }
 
     override fun close() {

@@ -10,14 +10,14 @@ separately and consumed as binaries.
 
 | Artifact | Version scheme | Contents |
 |---|---|---|
-| `com.surrealdev.temporal:core-common` | `<temporal-kt version>` | Hand-written config vocabulary (`TlsConfig`, `WorkerConfig`, `SlotSupplier`, `TemporalCoreException`, ...) |
-| `com.surrealdev.temporal:protos` | `<sdk-core version>-<temporal-kt version>` | Generated protobuf classes for the Temporal API and SDK-Core's `coresdk.*` messages |
-| `com.surrealdev.temporal:core-bridge` | `<sdk-core version>-<temporal-kt version>` | Kotlin/FFM bindings onto SDK-Core |
+| `com.surrealdev.temporal:core-common` | `<bridge version>` | Hand-written config vocabulary (`TlsConfig`, `WorkerConfig`, `SlotSupplier`, `TemporalCoreException`, ...) |
+| `com.surrealdev.temporal:protos` | `<sdk-core version>-<bridge version>` | Generated protobuf classes for the Temporal API and SDK-Core's `coresdk.*` messages |
+| `com.surrealdev.temporal:core-bridge` | `<sdk-core version>-<bridge version>` | Kotlin/FFM bindings onto SDK-Core |
 | `com.surrealdev.temporal:core-bridge:<classifier>` | same | The native library, one JAR per platform |
 
 ### Why two version components
 
-`core-bridge` and `protos` are versioned `<sdkCoreVersion>-<version>` — for example `0.6.0-0.1.11`
+`core-bridge` and `protos` are versioned `<sdkCoreVersion>-<version>` — for example `0.8.0-0.1.11`
 — because their content is determined by an SDK-Core release as much as by temporal-kt: `protos`
 *is* that release's schema, and `core-bridge` is the binding to its API. The coordinate tells you
 which Core an artifact speaks to without opening it.
@@ -37,9 +37,9 @@ library needs anything newer than that floor.
 
 ## Building
 
-Requires JDK 25, a Rust toolchain meeting `core-bridge/rust/kt-bridge/rust-toolchain.toml`
-(currently 1.94; note that rustup will not pick that file up from the outer workspace directory,
-so your default toolchain must satisfy it), and `protoc` is supplied by Gradle.
+Requires JDK 25, the Rust toolchain pinned in `core-bridge/rust/kt-bridge/rust-toolchain.toml`,
+and `protoc` on PATH for Rust's build script. Gradle supplies its own protoc
+for JVM source generation.
 
 ```bash
 git clone https://github.com/SurrealDevelopment/temporal-kt-bridge.git
@@ -56,16 +56,17 @@ The common case is changing Rust only. Build here, then point temporal-kt's test
 no Gradle wiring, no JAR packaging:
 
 ```bash
-cd temporal-kt-bridge && cargo build --release --manifest-path core-bridge/rust/Cargo.toml
-cd ../temporal-kt && ./gradlew :core:test \
-  -Ptemporal.nativeLib=$PWD/../temporal-kt-bridge/core-bridge/rust/target/release/libtemporalio_sdk_core_c_bridge.dylib
+cd temporal-kt-bridge/core-bridge/rust/kt-bridge && cargo build --release --locked
+cd ../../../../temporal-kt && ./gradlew :core:test \
+  -Ptemporal.nativeLib=$PWD/../temporal-kt-bridge/core-bridge/rust/kt-bridge/target/release/libkt_bridge.dylib
 ```
 
 To change Kotlin on both sides at once, build temporal-kt against this repo as a composite build.
 Coordinates match, so Gradle substitutes the projects automatically:
 
 ```bash
-cd temporal-kt && ./gradlew build -Ptemporal.bridgePath=../temporal-kt-bridge
+cd temporal-kt && ./gradlew build -Ptemporal.bridgePath=../temporal-kt-bridge \
+  -Ptemporal.nativeLib=$PWD/../temporal-kt-bridge/core-bridge/rust/kt-bridge/target/release/libkt_bridge.dylib
 ```
 
 Note that classifier dependencies are not substitutable in a composite build, so the native
