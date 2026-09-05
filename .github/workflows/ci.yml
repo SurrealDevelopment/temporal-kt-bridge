@@ -242,18 +242,15 @@ jobs:
             platform: linux-x86_64-gnu
             artifact-name: native-libs-linux-x86_64-gnu
             artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
-            experimental: false
           - os: ubuntu-24.04-arm
             platform: linux-aarch64-gnu
             artifact-name: native-libs-linux-aarch64-gnu
             artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
-            experimental: false
           - os: macos-14
             platform: macos-aarch64
             artifact-name: native-libs-macos-aarch64
             artifact-path: core-bridge/build/native-libs/native/macos-aarch64
             expected-libs: 1
-            experimental: false
           # Windows was disabled in temporal-kt because the 30-minute cargo build made it
           # unreliable. That cost is gone here (the native is a downloaded artifact), so it runs
           # again -- non-blocking until it has a track record.
@@ -264,7 +261,6 @@ jobs:
             expected-libs: 1
             experimental: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-java@v4
