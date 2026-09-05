@@ -299,14 +299,6 @@ kt_export! {
             .tokio_handle()
             .block_on(async { temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone()) })
             .map_err(KtError::from)?;
-        // One DescribeNamespace, as sdk-python does. Without it a wrong namespace or bad
-        // credentials only surface later as a stream of poll errors, by which time the caller's
-        // create() has long since returned success.
-        rt.core
-            .tokio_handle()
-            .block_on(core.validate())
-            .map_err(|e| KtError::InvalidArgument(format!("worker validation failed: {e}")))?;
-
         let mut entry = worker::WorkerEntry::new(
             std::sync::Arc::new(core),
             rt.sender(),
@@ -316,6 +308,24 @@ kt_export! {
         let handle = HANDLES.insert_owned(runtime, Entry::Worker(std::sync::Arc::new(entry)))?;
         unsafe { out_worker.write(handle) };
         Ok(())
+    }
+}
+
+kt_export! {
+    /// Performs server-side validation without blocking the calling JVM thread.
+    fn kt_worker_validate(runtime: u64, worker: u64, req_id: u64) {
+        if req_id == 0 {
+            return Err(KtError::InvalidArgument("req_id 0 is reserved for pushed events".into()));
+        }
+        let rt = HANDLES.runtime(runtime)?;
+        HANDLES.require_owner(worker, runtime)?;
+        let core = HANDLES.worker(worker)?.core()?;
+        runtime::spawn_request(&rt, req_id, async move {
+            match core.validate().await {
+                Ok(_) => queue::Pending::ack(req_id),
+                Err(error) => queue::Pending::error(req_id, KT_ERR_INVALID_ARGUMENT, format!("worker validation failed: {error}")),
+            }
+        })
     }
 }
 

@@ -120,6 +120,8 @@ internal object KtBridge {
             "kt_worker_new",
             FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS),
         )
+    private val workerValidateFn =
+        handle("kt_worker_validate", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG))
     private val workerStartFn =
         handle("kt_worker_start", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG))
     private val workerCompleteFn =
@@ -172,7 +174,7 @@ internal object KtBridge {
             val expected =
                 intArrayOf(
                     0x4B544231,
-                    2,
+                    3,
                     RECORD_BYTES.toInt(),
                     O_REQ_ID.toInt(),
                     O_KIND.toInt(),
@@ -332,6 +334,12 @@ internal object KtBridge {
             )
             out.get(JAVA_LONG, 0)
         }
+
+    fun workerValidate(
+        runtime: Long,
+        worker: Long,
+        reqId: Long,
+    ) = check(workerValidateFn.invokeExact(runtime, worker, reqId) as Int, "kt_worker_validate")
 
     fun workerStart(
         runtime: Long,

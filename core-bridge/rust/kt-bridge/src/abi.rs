@@ -8,7 +8,7 @@
 //! all-scalar struct there is nothing left to drift.
 
 /// Bumped only when the shape below changes incompatibly.
-pub const KT_ABI_VERSION: u32 = 2;
+pub const KT_ABI_VERSION: u32 = 3;
 
 /// "KTB1", so a probe against the wrong library fails on the first word.
 pub const KT_ABI_MAGIC: u32 = 0x4B54_4231;

@@ -72,6 +72,29 @@ class EphemeralServerLifecycleTest {
             }
         }
 
+    @Test
+    fun `failed shutdown preserves the live server pid`() =
+        runBlocking {
+            for (testServer in listOf(false, true)) {
+                TemporalRuntime.create().use { runtime ->
+                    val server: EphemeralServer =
+                        if (testServer) TemporalTestServer.start(runtime) else TemporalDevServer.start(runtime)
+                    server.use {
+                        val pid = assertNotNull(server.pid)
+                        runtime.kt.pump.close()
+                        kotlin.test.assertFailsWith<TemporalCoreException> {
+                            when (server) {
+                                is TemporalTestServer -> server.shutdown()
+                                is TemporalDevServer -> server.shutdown()
+                            }
+                        }
+                        assertTrue(isRunning(pid))
+                        assertEquals(pid, server.pid, "a rejected shutdown must not hide the live child")
+                    }
+                }
+            }
+        }
+
     private suspend fun awaitCondition(
         timeout: Duration = 20.seconds,
         message: String,

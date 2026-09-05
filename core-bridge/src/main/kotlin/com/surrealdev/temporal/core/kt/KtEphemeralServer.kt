@@ -33,7 +33,6 @@ internal class KtEphemeralServer private constructor(
             runtime.pump.request { reqId ->
                 KtBridge.ephemeralShutdown(runtime.handle, handle, reqId)
             }
-        shutDown = true
         if (completion.isFailure) {
             throw TemporalCoreException(
                 message = "could not shut down the ephemeral server: ${completion.errorMessage()}",
@@ -43,6 +42,7 @@ internal class KtEphemeralServer private constructor(
                 writableStackTrace = true,
             )
         }
+        shutDown = true
     }
 
     override fun close() {

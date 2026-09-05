@@ -22,6 +22,61 @@ import kotlin.time.Duration.Companion.milliseconds
  * the already-taken worker and panicked across the FFI boundary (SIGABRT of the whole JVM).
  */
 class TemporalWorkerShutdownTest {
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(
+        org.junit.jupiter.api.condition.OS.MAC,
+        org.junit.jupiter.api.condition.OS.LINUX,
+    )
+    fun `worker creation can be cancelled while namespace validation is stalled`() =
+        runBlocking {
+            TemporalRuntime.create().use { runtime ->
+                TemporalDevServer.start(runtime).use { server ->
+                    TemporalCoreClient.connect(runtime, server.targetUrl).use { client ->
+                        val pid = kotlin.test.assertNotNull(server.pid)
+
+                        fun signal(name: String) {
+                            check(ProcessBuilder("kill", "-$name", pid.toString()).start().waitFor() == 0)
+                        }
+                        signal("STOP")
+                        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+                        val job =
+                            launch(kotlinx.coroutines.Dispatchers.Default) {
+                                entered.complete(Unit)
+                                TemporalWorker.create(runtime, client, "cancel-validation", "default").use { }
+                            }
+                        try {
+                            entered.await()
+                            delay(200.milliseconds)
+                            kotlinx.coroutines.withTimeout(2_000) {
+                                job.cancel()
+                                job.join()
+                            }
+                        } finally {
+                            signal("CONT")
+                            job.cancel()
+                            job.join()
+                        }
+                    }
+                }
+            }
+        }
+
+    @Test
+    fun `worker creation still rejects an unknown namespace`() =
+        runBlocking {
+            TemporalRuntime.create().use { runtime ->
+                TemporalDevServer.start(runtime).use { server ->
+                    TemporalCoreClient.connect(runtime, server.targetUrl).use { client ->
+                        val error =
+                            assertFailsWith<TemporalCoreException> {
+                                TemporalWorker.create(runtime, client, "validation", "namespace-does-not-exist").use { }
+                            }
+                        assertTrue(error.message.orEmpty().contains("namespace-does-not-exist"))
+                    }
+                }
+            }
+        }
+
     private fun heartbeat(): CoreInterface.ActivityHeartbeat =
         CoreInterface.ActivityHeartbeat
             .newBuilder()

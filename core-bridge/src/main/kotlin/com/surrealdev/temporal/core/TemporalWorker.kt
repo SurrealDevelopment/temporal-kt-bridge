@@ -53,8 +53,8 @@ class TemporalWorker private constructor(
     private var shutdownFinalized = false
 
     companion object {
-        /** Creates a worker and starts Core's poll loops. */
-        fun create(
+        /** Creates and validates a worker before starting Core's poll loops. Network validation is cancellable. */
+        suspend fun create(
             runtime: TemporalRuntime,
             client: TemporalCoreClient,
             taskQueue: String,
@@ -91,7 +91,7 @@ class TemporalWorker private constructor(
 
     fun isShutdownFinalized(): Boolean = shutdownFinalized
 
-    /** No-op: Core validates the worker configuration when it is built. */
+    /** No-op: [create] already completed Core's configuration and server-side validation. */
     suspend fun validate() {
         ensureOpen()
     }

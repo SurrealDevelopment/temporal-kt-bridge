@@ -92,8 +92,8 @@ class TemporalDevServer private constructor(
 
     suspend fun shutdown() {
         if (closed) return
-        shutDown = true
         kt.shutdown()
+        shutDown = true
     }
 
     override fun close() {

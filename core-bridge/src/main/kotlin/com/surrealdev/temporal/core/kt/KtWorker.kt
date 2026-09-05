@@ -231,7 +231,7 @@ internal class KtWorker private constructor(
 
     companion object {
         /** @param config an encoded `kt_bridge.WorkerOptions`. */
-        fun create(
+        suspend fun create(
             runtime: KtRuntime,
             client: KtClient,
             config: ByteArray,
@@ -252,6 +252,16 @@ internal class KtWorker private constructor(
             val worker = KtWorker(runtime, handle)
             // Registered before start(), so no task can arrive with nowhere to go.
             try {
+                val completion =
+                    runtime.pump.request { reqId ->
+                        KtBridge.workerValidate(runtime.handle, handle, reqId)
+                    }
+                if (completion.isFailure) {
+                    throw TemporalCoreException(
+                        message = completion.errorMessage(),
+                        statusCode = completion.status,
+                    )
+                }
                 runtime.onWorkerEvents(handle, worker::onEvent)
             } catch (t: Throwable) {
                 worker.close()
