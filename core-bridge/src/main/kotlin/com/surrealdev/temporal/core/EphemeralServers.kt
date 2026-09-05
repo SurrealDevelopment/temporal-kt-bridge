@@ -1,8 +1,5 @@
 package com.surrealdev.temporal.core
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.nio.file.Files
@@ -18,22 +15,30 @@ import kotlin.io.path.readLines
 /**
  * Process-lifecycle safety net for [EphemeralServer] instances.
  *
- * Ephemeral servers are real child processes spawned by the Core SDK. Core kills the child
- * when [EphemeralServer.close] runs, but nothing ties the child's lifetime to this JVM: a JVM
- * that dies without closing a server (force-stopped test run, `kill -9`, hard crash) leaves
- * the server running forever. Such an orphan also holds the inherited stdout/stderr pipes of
- * the dead JVM, which makes a Gradle test worker's parent wait for EOF indefinitely.
+ * Ephemeral servers are real child processes spawned by Core. Core kills the child when the
+ * server is dropped (`kill_on_drop`), and the bridge shuts it down when a start is abandoned or a
+ * runtime is freed -- but nothing ties the child to this JVM once the JVM is gone. A JVM that dies
+ * without closing a server (force-stopped test run, `kill -9`, hard crash) leaves it running.
  *
- * Defenses, all exact (no process-table guessing):
+ * What that costs has changed. With the C bridge the child inherited the JVM's stdout/stderr, so
+ * an orphan held a Gradle test worker's pipes open and the build hung forever; that was the
+ * reason this file exists. The kt-bridge redirects the child's stdio to a file or /dev/null, so an
+ * orphan is now only a stray process holding a port. This file is therefore hygiene, not a hang
+ * preventer, and it is kept because stray servers accumulate on developer machines.
+ *
+ * Two mechanisms, both exact (no process-table guessing):
  * 1. Every started server is registered here and unregistered on close. A JVM shutdown hook
  *    closes whatever is still registered, so normal and `System.exit` exits never leave a child.
- * 2. `start` functions are non-cancellable at the native boundary and close the server they
- *    produced if their caller was cancelled meanwhile (see [TemporalDevServer.start]).
- * 3. Each registered server's process is recorded in a per-JVM file under [registryDir] as
+ * 2. Each registered server's process is recorded in a per-JVM file under [registryDir] as
  *    `<pid> <processStartMillis>`, keyed by this JVM's own pid and start time. [reapOrphans]
  *    reads the records of JVMs that no longer exist and kills exactly those processes, after
  *    checking the pid still refers to the recorded process (start time match, so a reused pid
  *    is never killed). The test fixture calls it once per JVM.
+ *
+ * There used to be a third: `start` was made non-cancellable and closed the server it produced
+ * if its caller had been cancelled meanwhile. The bridge now does that itself on both sides of
+ * the boundary (a completion that lost its race releases the handle it carried), so that code
+ * is gone rather than kept as a second, unreachable copy.
  */
 object EphemeralServers {
     private val logger = LoggerFactory.getLogger(EphemeralServers::class.java)
@@ -227,19 +232,4 @@ object EphemeralServers {
     private fun ProcessHandle.startMillis(): Long? = info().startInstant().map { it.toEpochMilli() }.orElse(null)
 
     internal const val RECORD_SUFFIX = ".pids"
-}
-
-/**
- * Completes a non-cancellable server start: if the calling coroutine was cancelled while the
- * native start was in flight, closes the freshly started server (nobody else will) and
- * rethrows the cancellation; otherwise returns the server.
- */
-internal suspend fun <T : EphemeralServer> T.closeIfCancelled(): T {
-    try {
-        currentCoroutineContext().ensureActive()
-    } catch (e: CancellationException) {
-        close()
-        throw e
-    }
-    return this
 }
