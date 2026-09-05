@@ -107,7 +107,7 @@ internal class Pump(
                         KtBridgeException(
                             KtBridge.KT_ERR_SHUTDOWN,
                             "bridge pump has stopped; request $reqId not issued",
-                        ),
+                        ).asCore("request could not be issued"),
                     )
                 }
                 return@suspendCancellableCoroutine
@@ -236,7 +236,8 @@ internal class Pump(
             pending.remove(reqId)?.let { continuation ->
                 if (continuation.isActive) {
                     continuation.resumeWithException(
-                        KtBridgeException(KtBridge.KT_ERR_SHUTDOWN, "bridge shut down before request $reqId completed"),
+                        KtBridgeException(KtBridge.KT_ERR_SHUTDOWN, "bridge shut down before request $reqId completed")
+                            .asCore("request could not complete"),
                     )
                 }
             }

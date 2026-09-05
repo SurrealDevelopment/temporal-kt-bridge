@@ -89,14 +89,25 @@ class TemporalTestServer private constructor(
             logFile: String? = null,
         ): TemporalTestServer {
             runtime.ensureOpen()
-            val allArgs =
-                buildList {
-                    searchAttributes.forEach { (name, type) ->
-                        add("--search-attribute")
-                        add("$name=$type")
+            val attributes =
+                io.temporal.api.operatorservice.v1.AddSearchAttributesRequest
+                    .newBuilder()
+                    .setNamespace("default")
+            searchAttributes.forEach { (name, type) ->
+                require(name.isNotBlank()) { "Search attribute name must not be blank" }
+                val valueType =
+                    when (type) {
+                        "Text" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_TEXT
+                        "Keyword" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD
+                        "Int" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_INT
+                        "Double" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_DOUBLE
+                        "Bool" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_BOOL
+                        "Datetime" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_DATETIME
+                        "KeywordList" -> io.temporal.api.enums.v1.IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD_LIST
+                        else -> throw IllegalArgumentException("Unknown search attribute type: $type")
                     }
-                    addAll(extraArgs)
-                }
+                attributes.putSearchAttributes(name, valueType)
+            }
             val server =
                 com.surrealdev.temporal.core.kt.KtEphemeralServer.start(
                     runtime.kt,
@@ -110,21 +121,29 @@ class TemporalTestServer private constructor(
                         downloadTtlSeconds = downloadTtlSeconds,
                         namespace = "default",
                         ip = "127.0.0.1",
-                        extraArgs = allArgs,
+                        extraArgs = extraArgs,
                         testServer = true,
                         logFile = logFile,
                     ),
                 )
-            val client =
-                try {
-                    TemporalCoreClient.connect(runtime, server.target, "default")
-                } catch (e: Throwable) {
-                    // Do not leak the server process if its client cannot connect.
-                    server.shutdown()
-                    server.close()
-                    throw e
+            var client: TemporalCoreClient? = null
+            try {
+                val connected = TemporalCoreClient.connect(runtime, server.target, "default")
+                client = connected
+                if (searchAttributes.isNotEmpty()) {
+                    connected.kt.call(
+                        com.surrealdev.temporal.core.kt.KtService.OPERATOR,
+                        "AddSearchAttributes",
+                        attributes.build().toByteArray(),
+                    )
                 }
-            return TemporalTestServer(server, client).also { EphemeralServers.register(it) }
+                return TemporalTestServer(server, connected).also { EphemeralServers.register(it) }
+            } catch (e: Throwable) {
+                // Close is synchronous: cancellation must not interrupt cleanup of either handle.
+                client?.close()
+                server.close()
+                throw e
+            }
         }
     }
 
@@ -141,15 +160,7 @@ class TemporalTestServer private constructor(
     }
 
     suspend fun unlockTimeSkippingWithSleep(duration: Duration) {
-        val request =
-            SleepRequest
-                .newBuilder()
-                .setDuration(
-                    com.google.protobuf.Duration
-                        .newBuilder()
-                        .setSeconds(duration.inWholeSeconds)
-                        .setNanos((duration.inWholeNanoseconds % 1_000_000_000L).toInt()),
-                ).build()
+        val request = sleepRequest(duration)
         client.testServiceCall("UnlockTimeSkippingWithSleep", request) { SleepResponse.parseFrom(it) }
     }
 
@@ -164,15 +175,7 @@ class TemporalTestServer private constructor(
     }
 
     suspend fun sleep(duration: Duration) {
-        val request =
-            SleepRequest
-                .newBuilder()
-                .setDuration(
-                    com.google.protobuf.Duration
-                        .newBuilder()
-                        .setSeconds(duration.inWholeSeconds)
-                        .setNanos((duration.inWholeNanoseconds % 1_000_000_000L).toInt()),
-                ).build()
+        val request = sleepRequest(duration)
         client.testServiceCall("Sleep", request) { SleepResponse.parseFrom(it) }
     }
 
@@ -204,5 +207,22 @@ class TemporalTestServer private constructor(
             kt.close()
             EphemeralServers.unregister(this)
         }
+    }
+}
+
+/** Avoid saturating inWholeNanoseconds for durations longer than roughly 292 years. */
+internal fun sleepRequest(duration: Duration): SleepRequest {
+    require(duration.isFinite() && !duration.isNegative() && duration.inWholeSeconds <= 315_576_000_000L) {
+        "Sleep duration must be finite, nonnegative, and within the protobuf duration range"
+    }
+    return duration.toComponents { seconds, nanos ->
+        SleepRequest
+            .newBuilder()
+            .setDuration(
+                com.google.protobuf.Duration
+                    .newBuilder()
+                    .setSeconds(seconds)
+                    .setNanos(nanos),
+            ).build()
     }
 }

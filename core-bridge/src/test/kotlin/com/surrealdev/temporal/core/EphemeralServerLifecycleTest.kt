@@ -1,6 +1,7 @@
 package com.surrealdev.temporal.core
 
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -33,6 +34,43 @@ import kotlin.time.TimeSource
 @Isolated
 class EphemeralServerLifecycleTest {
     private fun isRunning(pid: Long): Boolean = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+
+    @Test
+    fun `cancelling test server client setup releases the already started server`() =
+        runBlocking {
+            TemporalRuntime.create().use { runtime ->
+                val existing = ProcessHandle.current().children().use { it.map(ProcessHandle::pid).toList().toSet() }
+                val ready = java.util.concurrent.LinkedBlockingQueue<Runnable>()
+                val dispatcher =
+                    java.util.concurrent
+                        .Executor { ready.add(it) }
+                        .asCoroutineDispatcher()
+                val job =
+                    launch(dispatcher, start = CoroutineStart.UNDISPATCHED) {
+                        TemporalTestServer.start(runtime).use { }
+                    }
+                try {
+                    // Pause delivery of the native start result until its child can be identified.
+                    val resumeStart = checkNotNull(ready.poll(60, java.util.concurrent.TimeUnit.SECONDS))
+                    val child =
+                        ProcessHandle.current().children().use { children ->
+                            children.filter { it.pid() !in existing }.toList().single()
+                        }
+                    resumeStart.run()
+                    assertTrue(job.isActive, "client setup must still be awaiting its completion")
+                    job.cancel()
+                    while (!job.isCompleted) {
+                        checkNotNull(ready.poll(10, java.util.concurrent.TimeUnit.SECONDS)).run()
+                    }
+                    awaitCondition(message = "cancelled test server setup to release its child") { !child.isAlive }
+                } finally {
+                    job.cancel()
+                    while (!job.isCompleted) {
+                        checkNotNull(ready.poll(10, java.util.concurrent.TimeUnit.SECONDS)).run()
+                    }
+                }
+            }
+        }
 
     private suspend fun awaitCondition(
         timeout: Duration = 20.seconds,

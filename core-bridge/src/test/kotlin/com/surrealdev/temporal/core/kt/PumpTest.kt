@@ -24,6 +24,22 @@ class PumpTest {
     private lateinit var pump: Pump
     private val pushed = mutableListOf<Completion>()
 
+    @Test
+    fun `stopping the pump exposes public exceptions to pending and new callers`(): Unit =
+        runBlocking {
+            val waiting =
+                async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                    assertFailsWith<com.surrealdev.temporal.core.TemporalCoreException> {
+                        pump.request { /* Simulate an operation whose native completion never arrives. */ }
+                    }
+                }
+            pump.close()
+            assertEquals(KtBridge.KT_ERR_SHUTDOWN, waiting.await().statusCode)
+            assertFailsWith<com.surrealdev.temporal.core.TemporalCoreException> {
+                pump.request { error("a stopped pump must not issue requests") }
+            }
+        }
+
     @BeforeTest
     fun setUp() {
         runtime = KtBridge.runtimeNew(ByteArray(0))
