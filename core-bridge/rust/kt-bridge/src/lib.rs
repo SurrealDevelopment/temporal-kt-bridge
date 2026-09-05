@@ -168,7 +168,6 @@ kt_export! {
     fn kt_runtime_free(runtime: u64) {
         let (entry, children) = HANDLES.remove_runtime(runtime)?;
         // Keep Core alive until every child has stopped. Drop no resources under the table lock.
-        runtime::free_runtime(entry.clone());
         let mut shutdown_error = None;
         for child in children {
             // kill_on_drop sends a signal but does not reap the process. Await it while the
@@ -179,6 +178,8 @@ kt_export! {
             }
             child.close();
         }
+        // This also awaits cleanup scheduled by already-freed handles and cancelled requests.
+        runtime::free_runtime(entry);
         shutdown_error.map_or(Ok(()), |error| Err(KtError::Failed(error)))
     }
 }
@@ -463,9 +464,11 @@ kt_export! {
         }
         let rt = HANDLES.runtime(runtime)?;
         let options = ephemeral::decode_options(unsafe { slice(cfg, cfg_len) }?)?;
+        let tokio = rt.core.tokio_handle().clone();
+        let tasks = rt.tasks.clone();
 
         runtime::spawn_request(&rt, req_id, async move {
-            match ephemeral::start(options).await {
+            match ephemeral::start(options, tokio, tasks).await {
                 Ok(server) => {
                     let info = server.info();
                     match HANDLES.insert_owned(runtime, Entry::Ephemeral(server)) {
@@ -510,8 +513,12 @@ kt_export! {
 
 kt_export! {
     fn kt_ephemeral_free(server: u64) {
-        HANDLES.remove_of_kind(server, handle::KIND_EPHEMERAL)?.close();
-        Ok(())
+        let Entry::Ephemeral(entry) = HANDLES.remove_of_kind(server, handle::KIND_EPHEMERAL)? else {
+            unreachable!()
+        };
+        // JVM close unregisters the PID on return, so the process must already be reaped.
+        // Native discarded completions use EphemeralEntry::drop and never block Tokio.
+        entry.shutdown_blocking().map_err(KtError::Failed)
     }
 }
 

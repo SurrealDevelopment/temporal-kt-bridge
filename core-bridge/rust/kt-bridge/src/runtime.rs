@@ -10,6 +10,7 @@ use temporalio_common::telemetry::metrics::CoreMeter;
 use temporalio_common::telemetry::{CoreTelemetry, Logger, TelemetryOptions};
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions as CoreRuntimeOptions, TokioRuntimeBuilder};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::abi::{KT_ERR_CANCELLED, KT_ERR_PANIC, KT_ERR_SHUTDOWN};
 use crate::error::{KtError, KtResult};
@@ -20,6 +21,8 @@ use crate::queue::{Pending, Queue, Sender};
 pub struct RuntimeEntry {
     pub core: CoreRuntime,
     pub queue: Queue,
+    /// Accepted requests and child cleanup must finish before Core's reactor is dropped.
+    pub tasks: TaskTracker,
     pub metrics: Option<Arc<BridgeMeter>>,
     /// Retained until a successful FFI buffer copy; a size probe must not consume samples.
     pub(crate) metric_batch: Mutex<Option<Vec<u8>>>,
@@ -127,6 +130,7 @@ pub fn new_runtime(config: crate::proto::RuntimeOptions) -> KtResult<Arc<Runtime
     Ok(Arc::new(RuntimeEntry {
         core,
         queue: Queue::new(),
+        tasks: TaskTracker::new(),
         metrics,
         metric_batch: Mutex::new(None),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -159,6 +163,8 @@ pub fn drain_metrics(entry: &RuntimeEntry) -> crate::proto::MetricBatch {
 
 pub fn free_runtime(entry: Arc<RuntimeEntry>) {
     entry.drain_pending_for_shutdown();
+    entry.tasks.close();
+    entry.core.tokio_handle().block_on(entry.tasks.wait());
 }
 
 pub fn runtime_info(_entry: &RuntimeEntry) -> crate::proto::RuntimeInfo {
@@ -188,11 +194,20 @@ where
     F: std::future::Future<Output = Pending> + Send + 'static,
 {
     let sender = entry.sender();
-    let token = entry.register(req_id)?;
+    // Reserve before admission: shutdown must not observe an empty tracker between register and spawn.
+    let reservation = entry.tasks.token();
+    let token = match entry.register(req_id) {
+        Ok(token) => token,
+        Err(error) => {
+            // Operation captures may schedule child cleanup when dropped; keep the reservation until then.
+            drop(op);
+            return Err(error);
+        }
+    };
     // Tasks own only request bookkeeping. Even a temporary Weak::upgrade can become the last
     // RuntimeEntry reference during free and drop Tokio from inside its own worker thread.
     let pending = entry.pending.clone();
-    entry.core.tokio_handle().spawn(async move {
+    let task = entry.tasks.track_future(async move {
         let result = tokio::select! {
             biased;
             _ = token.cancelled() => Pending::error(req_id, KT_ERR_CANCELLED, "cancelled"),
@@ -211,6 +226,10 @@ where
         }
         // Otherwise result drops here and releases any handle the caller never received.
     });
+    // TrackedFuture drops the operation and result before its token. Drop-scheduled cleanup is
+    // therefore tracked before this request retires, even when shutdown cancels it before its first poll.
+    drop(reservation);
+    entry.core.tokio_handle().spawn(task);
     Ok(())
 }
 

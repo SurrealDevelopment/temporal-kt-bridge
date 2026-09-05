@@ -24,11 +24,16 @@ use temporalio_sdk_core::ephemeral_server::{
     EphemeralExe, EphemeralExeVersion, EphemeralServer, TemporalDevServerConfig, TestServerConfig,
 };
 use tokio::sync::Mutex;
+use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use crate::error::{KtError, KtResult};
 
 pub struct EphemeralEntry {
-    server: Mutex<Option<EphemeralServer>>,
+    // The reservation follows the live child, including the gap between handle removal and free/Drop.
+    server: Mutex<Option<(EphemeralServer, TaskTrackerToken)>>,
+    tokio: tokio::runtime::Handle,
+    tasks: TaskTracker,
     /// Captured at start so it stays readable after shutdown consumes the server.
     ///
     /// The C bridge read it straight off the server, which is why its accessor was documented as
@@ -52,18 +57,45 @@ impl EphemeralEntry {
         // for runtime shutdown, and concurrent shutdowns must wait for the same child to exit.
         let mut server = self.server.lock().await;
         let result = match server.as_mut() {
-            Some(server) => server.shutdown().await.map_err(|e| format!("{e:#}")),
+            Some((server, _reservation)) => server.shutdown().await.map_err(|e| format!("{e:#}")),
             None => Ok(()), // idempotent
         };
         server.take();
         result
     }
 
-    /// Core's kill_on_drop stops the child even if another operation still holds this entry.
-    pub fn free(&self) {
-        // A held lock means shutdown is already killing and reaping the child.
-        if let Ok(mut server) = self.server.try_lock() {
-            server.take();
+    /// FFI free runs on a JVM thread; keep close synchronous without blocking a Tokio worker.
+    pub fn shutdown_blocking(&self) -> Result<(), String> {
+        self.tokio.block_on(self.shutdown())
+    }
+
+    /// Removing a handle must still reap the child before its owning runtime stops.
+    pub fn free(self: &Arc<Self>) {
+        let entry = self.clone();
+        self.tasks.spawn_on(
+            async move {
+                if let Err(error) = entry.shutdown().await {
+                    tracing::warn!(%error, "could not reap ephemeral server");
+                }
+            },
+            &self.tokio,
+        );
+    }
+}
+
+impl Drop for EphemeralEntry {
+    fn drop(&mut self) {
+        // Discarded creation results can drop their final Arc on Tokio. Never block that thread,
+        // and retain only its Handle: an Arc<RuntimeEntry> could drop Core on its own worker.
+        if let Some((mut server, _reservation)) = self.server.get_mut().take() {
+            self.tasks.spawn_on(
+                async move {
+                    if let Err(error) = server.shutdown().await {
+                        tracing::warn!(%error, "could not reap discarded ephemeral server");
+                    }
+                },
+                &self.tokio,
+            );
         }
     }
 }
@@ -100,9 +132,11 @@ fn exe(options: &crate::proto::EphemeralServerOptions) -> EphemeralExe {
     }
 }
 
-/// Starts a server with its stdio piped back to the JVM.
+/// Starts a server with its stdio redirected away from the JVM.
 pub async fn start(
     options: crate::proto::EphemeralServerOptions,
+    tokio: tokio::runtime::Handle,
+    tasks: TaskTracker,
 ) -> Result<Arc<EphemeralEntry>, String> {
     let port = port(&options).map_err(|e| e.to_string())?;
     let (out, err) = redirect(&options)?;
@@ -134,12 +168,16 @@ pub async fn start(
     }
     .map_err(|e| format!("{e:#}"))?;
 
+    // Before this return Core owns a private Child inside its startup future. Cancelling that
+    // future still uses Core's kill_on_drop; only completed starts can be explicitly reaped here.
     let pid = server.child_process_id().unwrap_or(0);
     let target = server.target.clone();
     let has_test_service = server.has_test_service;
 
     Ok(Arc::new(EphemeralEntry {
-        server: Mutex::new(Some(server)),
+        server: Mutex::new(Some((server, tasks.token()))),
+        tokio,
+        tasks,
         pid,
         target,
         has_test_service,
@@ -219,10 +257,13 @@ mod tests {
 
     #[test]
     fn an_unclaimed_server_completion_releases_its_handle_but_poll_transfers_ownership() {
+        let runtime = crate::runtime::new_runtime(crate::proto::RuntimeOptions::default()).unwrap();
         let new_handle = || {
             HANDLES.insert(Entry::Ephemeral(Arc::new(EphemeralEntry {
                 // A stopped server still has a live bridge handle; no process is needed to test ownership.
                 server: Mutex::new(None),
+                tokio: runtime.core.tokio_handle().clone(),
+                tasks: runtime.tasks.clone(),
                 pid: 1,
                 target: String::new(),
                 has_test_service: false,

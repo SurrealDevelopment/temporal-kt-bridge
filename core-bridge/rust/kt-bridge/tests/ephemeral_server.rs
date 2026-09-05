@@ -58,8 +58,10 @@ fn a_dev_server_starts_reports_its_pid_and_shuts_down() {
         ..Default::default()
     };
 
+    let tokio = rt.core.tokio_handle().clone();
+    let tasks = rt.tasks.clone();
     runtime::spawn_request(&rt, 1, async move {
-        match ephemeral::start(options).await {
+        match ephemeral::start(options, tokio, tasks).await {
             Ok(server) => {
                 let info = server.info();
                 let handle = HANDLES.insert(Entry::Ephemeral(server));
@@ -134,4 +136,102 @@ fn a_dev_server_starts_reports_its_pid_and_shuts_down() {
     assert_eq!(after.info().pid, info.pid, "pid must survive shutdown");
 
     runtime::free_runtime(rt);
+}
+
+#[test]
+#[cfg(unix)]
+fn runtime_close_reaps_a_completed_start_discarded_on_a_runtime_thread() {
+    let Some(path) = cli() else {
+        eprintln!("skipping: set TEMPORAL_CLI_PATH to a temporal binary to run this");
+        return;
+    };
+    let rt = runtime::new_runtime(proto::RuntimeOptions::default()).expect("runtime");
+    let server = rt
+        .core
+        .tokio_handle()
+        .block_on(ephemeral::start(
+            proto::EphemeralServerOptions {
+                existing_path: path,
+                ..Default::default()
+            },
+            rt.core.tokio_handle().clone(),
+            rt.tasks.clone(),
+        ))
+        .expect("server");
+    let pid = server.pid;
+    let handle = HANDLES.insert(Entry::Ephemeral(server));
+    let abandoned = queue::Pending::ack(1)
+        .kind(KtKind::EphemeralStarted)
+        .aux0(handle);
+    runtime::spawn_request(&rt, 1, async move {
+        let _owned = abandoned;
+        std::future::pending().await
+    })
+    .expect("request accepted");
+    // Cancellation drops Pending on Tokio, where blocking to reap a child would panic.
+    runtime::free_runtime(rt);
+    assert!(HANDLES.ephemeral(handle).is_err());
+    assert_reaped(pid);
+}
+
+#[cfg(unix)]
+fn assert_reaped(pid: u32) {
+    let process = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    assert!(
+        process.stdout.is_empty(),
+        "child {pid} must already be reaped, state={}",
+        String::from_utf8_lossy(&process.stdout),
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn runtime_close_waits_for_a_removed_server_before_cleanup_is_scheduled() {
+    let Some(path) = cli() else {
+        eprintln!("skipping: set TEMPORAL_CLI_PATH to a temporal binary to run this");
+        return;
+    };
+    let rt = runtime::new_runtime(proto::RuntimeOptions::default()).expect("runtime");
+    let server = rt
+        .core
+        .tokio_handle()
+        .block_on(ephemeral::start(
+            proto::EphemeralServerOptions {
+                existing_path: path,
+                ..Default::default()
+            },
+            rt.core.tokio_handle().clone(),
+            rt.tasks.clone(),
+        ))
+        .expect("server");
+    let pid = server.pid;
+    let handle = HANDLES.insert(Entry::Ephemeral(server));
+    // Pause free exactly after table removal. The reactor must still belong to this live child.
+    let removed = HANDLES
+        .remove_of_kind(handle, kt_bridge::handle::KIND_EPHEMERAL)
+        .unwrap();
+    let (finished, completion) = std::sync::mpsc::channel();
+    let tracker = rt.tasks.clone();
+    let closer = std::thread::spawn(move || {
+        runtime::free_runtime(rt);
+        finished.send(()).unwrap();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !tracker.is_closed() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let entered_shutdown = tracker.is_closed();
+    let waiting = completion.recv_timeout(Duration::from_millis(100)).is_err();
+    drop(removed);
+    completion.recv_timeout(Duration::from_secs(5)).unwrap();
+    closer.join().unwrap();
+    assert!(entered_shutdown, "closer did not enter runtime shutdown");
+    assert!(
+        waiting,
+        "runtime free returned before its removed child was reaped"
+    );
+    assert_reaped(pid);
 }

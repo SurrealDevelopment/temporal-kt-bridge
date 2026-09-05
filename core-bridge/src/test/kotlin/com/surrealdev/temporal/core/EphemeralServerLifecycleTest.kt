@@ -36,6 +36,81 @@ class EphemeralServerLifecycleTest {
     private fun isRunning(pid: Long): Boolean = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
 
     @Test
+    @EnabledOnOs(OS.MAC, OS.LINUX)
+    fun `server close reaps the child before returning`() =
+        runBlocking {
+            TemporalRuntime.create().use { runtime ->
+                TemporalDevServer.start(runtime).use { server ->
+                    val pid = assertNotNull(server.pid)
+                    server.close()
+                    assertReaped(pid)
+                }
+            }
+        }
+
+    @Test
+    @EnabledOnOs(OS.MAC, OS.LINUX)
+    fun `runtime close reaps servers whose handles were already freed`() =
+        runBlocking {
+            for (testServer in listOf(false, true)) {
+                var pid = 0L
+                TemporalRuntime.create().use { runtime ->
+                    val server: EphemeralServer =
+                        if (testServer) TemporalTestServer.start(runtime) else TemporalDevServer.start(runtime)
+                    server.use { pid = assertNotNull(it.pid) }
+                }
+                assertReaped(pid)
+            }
+        }
+
+    @Test
+    @EnabledOnOs(OS.MAC, OS.LINUX)
+    fun `runtime close reaps a completed start discarded by cancellation`() =
+        runBlocking {
+            var pid = 0L
+            TemporalRuntime.create().use { runtime ->
+                val existing = ProcessHandle.current().children().use { it.map(ProcessHandle::pid).toList().toSet() }
+                val ready = java.util.concurrent.LinkedBlockingQueue<Runnable>()
+                val dispatcher =
+                    java.util.concurrent
+                        .Executor { ready.add(it) }
+                        .asCoroutineDispatcher()
+                val job =
+                    launch(dispatcher, start = CoroutineStart.UNDISPATCHED) {
+                        TemporalDevServer.start(runtime).use { }
+                    }
+                try {
+                    // The pump has received a successful start; cancellation discards it before the caller resumes.
+                    val resumeStart = checkNotNull(ready.poll(60, java.util.concurrent.TimeUnit.SECONDS))
+                    pid =
+                        ProcessHandle.current().children().use { children ->
+                            children
+                                .filter { it.pid() !in existing }
+                                .toList()
+                                .single()
+                                .pid()
+                        }
+                    job.cancel()
+                    resumeStart.run()
+                } finally {
+                    job.cancel()
+                    while (!job.isCompleted) {
+                        checkNotNull(ready.poll(10, java.util.concurrent.TimeUnit.SECONDS)).run()
+                    }
+                }
+            }
+            assertReaped(pid)
+        }
+
+    private fun assertReaped(pid: Long) {
+        // ProcessHandle.isAlive considers a zombie dead. Check the OS process table without reaping it ourselves.
+        val process = ProcessBuilder("ps", "-o", "stat=", "-p", pid.toString()).start()
+        val state = process.inputStream.bufferedReader().use { it.readText().trim() }
+        process.waitFor()
+        assertTrue(state.isEmpty(), "server pid=$pid must be reaped before runtime close returns; state=$state")
+    }
+
+    @Test
     fun `cancelling test server client setup releases the already started server`() =
         runBlocking {
             TemporalRuntime.create().use { runtime ->
