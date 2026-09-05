@@ -53,14 +53,42 @@ pub struct RpcOutcome {
     pub message: String,
 }
 
+/// The status message, falling back to the transport error chain when gRPC gave none.
+///
+/// tonic reports an h2/hyper failure (connection closed, stream reset) as UNKNOWN with an empty
+/// message and the real cause only in `source()`. An empty "GetWorkflowExecutionHistory failed:"
+/// tells the caller nothing; the chain says what actually happened to the connection.
+fn status_message(status: &tonic::Status) -> String {
+    if !status.message().is_empty() {
+        return status.message().to_string();
+    }
+    let mut parts = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
+    while let Some(err) = cur {
+        parts.push(err.to_string());
+        cur = err.source();
+    }
+    if parts.is_empty() {
+        format!("{:?} with no message", status.code())
+    } else {
+        format!("{:?}: {}", status.code(), parts.join(": "))
+    }
+}
+
 macro_rules! dispatch {
-    ($client:expr, $rpc:expr, $bytes:expr, { $($name:literal => $method:ident($req:ty)),+ $(,)? }) => {
+    ($client:expr, $rpc:expr, $bytes:expr, $timeout:expr, { $($name:literal => $method:ident($req:ty)),+ $(,)? }) => {
         match $rpc {
             $(
                 $name => {
                     let decoded: $req = prost::Message::decode($bytes)
                         .map_err(|e| KtError::InvalidArgument(format!("{} request: {e}", $name)))?;
-                    match $client.$method(Request::new(decoded)).await {
+                    let mut request = Request::new(decoded);
+                    // A real gRPC deadline rather than a local timer, so the server stops working
+                    // on an abandoned long poll instead of holding the connection.
+                    if let Some(t) = $timeout {
+                        request.set_timeout(t);
+                    }
+                    match $client.$method(request).await {
                         Ok(response) => Ok(RpcOutcome {
                             payload: prost::Message::encode_to_vec(&response.into_inner()),
                             status_code: 0,
@@ -69,7 +97,7 @@ macro_rules! dispatch {
                         Err(status) => Ok(RpcOutcome {
                             payload: Vec::new(),
                             status_code: status.code() as i32,
-                            message: status.message().to_string(),
+                            message: status_message(&status),
                         }),
                     }
                 }
@@ -84,9 +112,10 @@ async fn call_workflow_service(
     connection: &Connection,
     rpc: &str,
     bytes: &[u8],
+    timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
     let mut client = connection.workflow_service();
-    dispatch!(client, rpc, bytes, {
+    dispatch!(client, rpc, bytes, timeout, {
         "RegisterNamespace" => register_namespace(RegisterNamespaceRequest),
         "DescribeNamespace" => describe_namespace(DescribeNamespaceRequest),
         "ListNamespaces" => list_namespaces(ListNamespacesRequest),
@@ -218,9 +247,10 @@ async fn call_operator_service(
     connection: &Connection,
     rpc: &str,
     bytes: &[u8],
+    timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
     let mut client = connection.operator_service();
-    dispatch!(client, rpc, bytes, {
+    dispatch!(client, rpc, bytes, timeout, {
         "AddSearchAttributes" => add_search_attributes(AddSearchAttributesRequest),
         "RemoveSearchAttributes" => remove_search_attributes(RemoveSearchAttributesRequest),
         "ListSearchAttributes" => list_search_attributes(ListSearchAttributesRequest),
@@ -240,12 +270,13 @@ async fn call_test_service(
     connection: &Connection,
     rpc: &str,
     bytes: &[u8],
+    timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
     let mut client = connection.test_service();
-    if let Some(outcome) = call_test_service_unit(&mut client, rpc).await? {
+    if let Some(outcome) = call_test_service_unit(&mut client, rpc, timeout).await? {
         return Ok(outcome);
     }
-    dispatch!(client, rpc, bytes, {
+    dispatch!(client, rpc, bytes, timeout, {
         "LockTimeSkipping" => lock_time_skipping(LockTimeSkippingRequest),
         "UnlockTimeSkipping" => unlock_time_skipping(UnlockTimeSkippingRequest),
         "Sleep" => sleep(SleepRequest),
@@ -258,9 +289,16 @@ async fn call_test_service(
 async fn call_test_service_unit(
     client: &mut Box<dyn temporalio_client::grpc::TestService>,
     rpc: &str,
+    timeout: Option<std::time::Duration>,
 ) -> KtResult<Option<RpcOutcome>> {
     let result = match rpc {
-        "GetCurrentTime" => Some(client.get_current_time(Request::new(())).await),
+        "GetCurrentTime" => {
+            let mut request = Request::new(());
+            if let Some(t) = timeout {
+                request.set_timeout(t);
+            }
+            Some(client.get_current_time(request).await)
+        }
         _ => None,
     };
     Ok(result.map(|r| match r {
@@ -272,7 +310,7 @@ async fn call_test_service_unit(
         Err(status) => RpcOutcome {
             payload: Vec::new(),
             status_code: status.code() as i32,
-            message: status.message().to_string(),
+            message: status_message(&status),
         },
     }))
 }
@@ -283,10 +321,11 @@ pub async fn call(
     service: Service,
     rpc: &str,
     bytes: &[u8],
+    timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
     match service {
-        Service::Workflow => call_workflow_service(connection, rpc, bytes).await,
-        Service::Operator => call_operator_service(connection, rpc, bytes).await,
-        Service::Test => call_test_service(connection, rpc, bytes).await,
+        Service::Workflow => call_workflow_service(connection, rpc, bytes, timeout).await,
+        Service::Operator => call_operator_service(connection, rpc, bytes, timeout).await,
+        Service::Test => call_test_service(connection, rpc, bytes, timeout).await,
     }
 }

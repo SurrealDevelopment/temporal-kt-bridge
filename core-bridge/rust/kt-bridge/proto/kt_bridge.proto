@@ -72,6 +72,11 @@ message WorkerOptions {
   ResourceSlotLimits workflow_resource_limits = 11;
   ResourceSlotLimits activity_resource_limits = 12;
   ResourceSlotLimits local_activity_resource_limits = 13;
+
+  // Negated so that proto3's false default means "enabled", matching no_remote_activities above
+  // and WorkerConfig's own defaults.
+  bool no_workflows = 14;
+  bool no_local_activities = 15;
 }
 
 // Core's resource-based slot supplier, which hands out slots while memory and CPU are under

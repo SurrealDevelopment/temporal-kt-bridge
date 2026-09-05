@@ -205,6 +205,7 @@ kt_export! {
         rpc_len: u32,
         req_ptr: *const u8,
         req_len: u32,
+        timeout_millis: u64,
         req_id: u64,
     ) {
         if req_id == 0 {
@@ -212,6 +213,9 @@ kt_export! {
         }
         let rt = HANDLES.runtime(runtime)?;
         let cl = HANDLES.client(client)?;
+        // 0 means no deadline. Callers that long-poll set one and expect DEADLINE_EXCEEDED when
+        // the window elapses, which is how they tell "nothing happened yet" from a real failure.
+        let timeout = (timeout_millis > 0).then(|| std::time::Duration::from_millis(timeout_millis));
         let service = rpc::Service::from_u32(service)?;
         let rpc_name = std::str::from_utf8(unsafe { slice(rpc_ptr, rpc_len) }?)
             .map_err(|e| KtError::InvalidArgument(format!("rpc name is not UTF-8: {e}")))?
@@ -219,7 +223,7 @@ kt_export! {
         let request = unsafe { slice(req_ptr, req_len) }?.to_vec();
 
         runtime::spawn_request(&rt, req_id, async move {
-            match rpc::call(&cl.connection, service, &rpc_name, &request).await {
+            match rpc::call(&cl.connection, service, &rpc_name, &request, timeout).await {
                 Ok(outcome) if outcome.status_code == 0 => queue::Pending::ack(req_id)
                     .kind(KtKind::Rpc)
                     .payload(outcome.payload),

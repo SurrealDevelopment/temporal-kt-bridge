@@ -250,8 +250,8 @@ pub fn worker_config(
     // builder is typestate-based, so options cannot be applied by conditional reassignment --
     // hence `maybe_*` and one chained expression.
     let task_types = WorkerTaskTypes {
-        enable_workflows: true,
-        enable_local_activities: true,
+        enable_workflows: !options.no_workflows,
+        enable_local_activities: !options.no_local_activities,
         enable_remote_activities: !options.no_remote_activities,
         enable_nexus: false,
     };

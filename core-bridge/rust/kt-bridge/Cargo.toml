@@ -21,6 +21,9 @@ temporalio-client = "0.8"
 temporalio-common = { version = "0.8", features = ["core-based-sdk", "otel"] }
 
 anyhow = "1"
+# The same crate SDK-Core uses for this; $HOSTNAME is a shell variable, not an exported one,
+# so reading the environment yields nothing on macOS and in most containers.
+gethostname = "1"
 thiserror = "2"
 futures-util = { version = "0.3", default-features = false }
 parking_lot = "0.12"

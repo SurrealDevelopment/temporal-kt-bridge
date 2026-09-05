@@ -91,27 +91,39 @@ def main() -> int:
         if unit_arms:
             unit_impl = (
                 "    if let Some(outcome) = "
-                f"call_{accessor}_unit(&mut client, rpc).await? {{\n        return Ok(outcome);\n    }}\n"
+                f"call_{accessor}_unit(&mut client, rpc, timeout).await? {{\n        return Ok(outcome);\n    }}\n"
             )
         parts.append(
             f"\n/// {count} RPCs on {service}.\n"
-            f"async fn call_{accessor}(connection: &Connection, rpc: &str, bytes: &[u8])"
-            f" -> KtResult<RpcOutcome> {{\n"
+            f"async fn call_{accessor}(\n"
+            f"    connection: &Connection,\n"
+            f"    rpc: &str,\n"
+            f"    bytes: &[u8],\n"
+            f"    timeout: Option<std::time::Duration>,\n"
+            f") -> KtResult<RpcOutcome> {{\n"
             f"    let mut client = connection.{accessor}();\n"
             f"{unit_impl}"
-            f"    dispatch!(client, rpc, bytes, {{\n{arms}\n    }})\n}}\n"
+            f"    dispatch!(client, rpc, bytes, timeout, {{\n{arms}\n    }})\n}}\n"
         )
         if unit_arms:
             names = [a.split('"')[1] for a in unit_arms.split("\n")]
             methods = [a.split("=> ")[1].split("(")[0] for a in unit_arms.split("\n")]
             cases = "\n".join(
-                f'        "{n}" => Some(client.{m}(Request::new(())).await),' for n, m in zip(names, methods)
+                f'        "{n}" => {{\n'
+                f"            let mut request = Request::new(());\n"
+                f"            if let Some(t) = timeout {{\n"
+                f"                request.set_timeout(t);\n"
+                f"            }}\n"
+                f"            Some(client.{m}(request).await)\n"
+                f"        }}"
+                for n, m in zip(names, methods)
             )
             parts.append(
                 f"\n/// Unit-request RPCs on {service}: nothing to decode, so they bypass `dispatch!`.\n"
                 f"async fn call_{accessor}_unit(\n"
                 f"    client: &mut Box<dyn temporalio_client::grpc::{service}>,\n"
                 f"    rpc: &str,\n"
+                f"    timeout: Option<std::time::Duration>,\n"
                 f") -> KtResult<Option<RpcOutcome>> {{\n"
                 f"    let result = match rpc {{\n{cases}\n        _ => None,\n    }};\n"
                 f"    Ok(result.map(|r| match r {{\n"
@@ -123,7 +135,7 @@ def main() -> int:
                 f"        Err(status) => RpcOutcome {{\n"
                 f"            payload: Vec::new(),\n"
                 f"            status_code: status.code() as i32,\n"
-                f"            message: status.message().to_string(),\n"
+                f"            message: status_message(&status),\n"
                 f"        }},\n"
                 f"    }}))\n}}\n"
             )
@@ -191,14 +203,42 @@ pub struct RpcOutcome {
     pub message: String,
 }
 
+/// The status message, falling back to the transport error chain when gRPC gave none.
+///
+/// tonic reports an h2/hyper failure (connection closed, stream reset) as UNKNOWN with an empty
+/// message and the real cause only in `source()`. An empty "GetWorkflowExecutionHistory failed:"
+/// tells the caller nothing; the chain says what actually happened to the connection.
+fn status_message(status: &tonic::Status) -> String {
+    if !status.message().is_empty() {
+        return status.message().to_string();
+    }
+    let mut parts = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
+    while let Some(err) = cur {
+        parts.push(err.to_string());
+        cur = err.source();
+    }
+    if parts.is_empty() {
+        format!("{:?} with no message", status.code())
+    } else {
+        format!("{:?}: {}", status.code(), parts.join(": "))
+    }
+}
+
 macro_rules! dispatch {
-    ($client:expr, $rpc:expr, $bytes:expr, { $($name:literal => $method:ident($req:ty)),+ $(,)? }) => {
+    ($client:expr, $rpc:expr, $bytes:expr, $timeout:expr, { $($name:literal => $method:ident($req:ty)),+ $(,)? }) => {
         match $rpc {
             $(
                 $name => {
                     let decoded: $req = prost::Message::decode($bytes)
                         .map_err(|e| KtError::InvalidArgument(format!("{} request: {e}", $name)))?;
-                    match $client.$method(Request::new(decoded)).await {
+                    let mut request = Request::new(decoded);
+                    // A real gRPC deadline rather than a local timer, so the server stops working
+                    // on an abandoned long poll instead of holding the connection.
+                    if let Some(t) = $timeout {
+                        request.set_timeout(t);
+                    }
+                    match $client.$method(request).await {
                         Ok(response) => Ok(RpcOutcome {
                             payload: prost::Message::encode_to_vec(&response.into_inner()),
                             status_code: 0,
@@ -207,7 +247,7 @@ macro_rules! dispatch {
                         Err(status) => Ok(RpcOutcome {
                             payload: Vec::new(),
                             status_code: status.code() as i32,
-                            message: status.message().to_string(),
+                            message: status_message(&status),
                         }),
                     }
                 }
@@ -225,11 +265,12 @@ pub async fn call(
     service: Service,
     rpc: &str,
     bytes: &[u8],
+    timeout: Option<std::time::Duration>,
 ) -> KtResult<RpcOutcome> {
     match service {
-        Service::Workflow => call_workflow_service(connection, rpc, bytes).await,
-        Service::Operator => call_operator_service(connection, rpc, bytes).await,
-        Service::Test => call_test_service(connection, rpc, bytes).await,
+        Service::Workflow => call_workflow_service(connection, rpc, bytes, timeout).await,
+        Service::Operator => call_operator_service(connection, rpc, bytes, timeout).await,
+        Service::Test => call_test_service(connection, rpc, bytes, timeout).await,
     }
 }
 '''

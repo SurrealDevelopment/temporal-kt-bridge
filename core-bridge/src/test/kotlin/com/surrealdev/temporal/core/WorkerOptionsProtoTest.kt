@@ -130,4 +130,30 @@ class WorkerOptionsProtoTest {
         assertEquals(0.0, double(tuner.getValue(4).single()))
         assertEquals(0.0, double(tuner.getValue(8).single()))
     }
+
+    @Test
+    fun `worker identity and task-type toggles reach the wire`() {
+        val encoded =
+            WorkerOptionsProto.encode(
+                "q",
+                "ns",
+                WorkerConfig(
+                    workerIdentity = "payment-worker",
+                    enableActivities = false,
+                    enableLocalActivities = false,
+                ),
+            )
+        val f = fields(encoded)
+        assertEquals("payment-worker", String(f.getValue(3).single()))
+        // Negated on the wire, so "disabled" is what shows up.
+        assertEquals(1, f.getValue(8).single()[0].toInt(), "enableActivities=false -> no_remote_activities")
+        assertEquals(1, f.getValue(15).single()[0].toInt(), "enableLocalActivities=false -> no_local_activities")
+        assertTrue(14 !in f, "workflows stay enabled, so nothing is sent")
+    }
+
+    @Test
+    fun `no identity means the bridge derives one`() {
+        val f = fields(WorkerOptionsProto.encode("q", "ns", WorkerConfig()))
+        assertTrue(3 !in f, "an unset identity must not be sent as an empty string")
+    }
 }

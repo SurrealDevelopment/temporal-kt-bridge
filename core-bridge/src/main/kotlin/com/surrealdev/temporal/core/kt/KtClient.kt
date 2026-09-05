@@ -32,11 +32,12 @@ internal class KtClient(
         service: KtService,
         rpc: String,
         request: ByteArray,
+        timeoutMillis: Long = 0,
     ): ByteArray {
         runtime.ensureOpen()
         val completion =
             runtime.pump.request { reqId ->
-                KtBridge.clientRpc(runtime.handle, handle, service.code, rpc, request, reqId)
+                KtBridge.clientRpc(runtime.handle, handle, service.code, rpc, request, timeoutMillis, reqId)
             }
         if (completion.isFailure) {
             throw TemporalCoreException(

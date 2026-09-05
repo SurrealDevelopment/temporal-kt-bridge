@@ -126,7 +126,7 @@ class TemporalCoreClient private constructor(
         request: Req,
         timeoutMillis: Int = 0,
         parser: (CodedInputStream) -> Resp,
-    ): Resp = call(KtService.WORKFLOW, rpc, request, parser)
+    ): Resp = call(KtService.WORKFLOW, rpc, request, timeoutMillis, parser)
 
     /** Calls a TestService RPC. Only available against a test server with time skipping. */
     suspend fun <Req : MessageLite, Resp : MessageLite> testServiceCall(
@@ -134,16 +134,19 @@ class TemporalCoreClient private constructor(
         request: Req,
         timeoutMillis: Int = 0,
         parser: (CodedInputStream) -> Resp,
-    ): Resp = call(KtService.TEST, rpc, request, parser)
+    ): Resp = call(KtService.TEST, rpc, request, timeoutMillis, parser)
 
     private suspend fun <Req : MessageLite, Resp : MessageLite> call(
         service: KtService,
         rpc: String,
         request: Req,
+        timeoutMillis: Int,
         parser: (CodedInputStream) -> Resp,
     ): Resp {
         ensureOpen()
-        val response = kt.call(service, rpc, request.toByteArray())
+        // 0 means no deadline. A caller that long-polls sets one and reads DEADLINE_EXCEEDED as
+        // "the window elapsed", so dropping it here would turn every poll into an unbounded wait.
+        val response = kt.call(service, rpc, request.toByteArray(), timeoutMillis.toLong())
         return parser(CodedInputStream.newInstance(response))
     }
 

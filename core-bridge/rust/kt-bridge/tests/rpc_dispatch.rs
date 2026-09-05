@@ -46,6 +46,7 @@ fn rpcs_round_trip_and_grpc_errors_keep_the_servers_status_code() {
             rpc::Service::Workflow,
             "DescribeNamespace",
             &request,
+            None,
         )
         .await
         .expect("dispatch");
@@ -68,6 +69,7 @@ fn rpcs_round_trip_and_grpc_errors_keep_the_servers_status_code() {
             rpc::Service::Workflow,
             "StartWorkflowExecution",
             &empty,
+            None,
         )
         .await
         .expect("dispatch");
@@ -87,7 +89,8 @@ fn rpcs_round_trip_and_grpc_errors_keep_the_servers_status_code() {
                 &connection.connection,
                 rpc::Service::Workflow,
                 "NoSuchRpc",
-                &[]
+                &[],
+                None,
             )
             .await
             .is_err()

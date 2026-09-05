@@ -1,14 +1,10 @@
 # Pinned so `clippy -D warnings` is reproducible: a floating `stable` picks up new lints on an
 # unrelated PR and turns CI red for reasons the author did not cause. 1.97 is what this crate is
-# developed and released against; the shipped classifier JARs are built by this compiler.
+# developed and released against, and what builds the shipped classifier JARs.
 #
-# The cross-compiled classifiers need their targets present in the same toolchain.
+# No `targets` list. Each classifier is built on a runner of its own architecture (see the native
+# matrix in ci.yml), so every `--target` we pass is the host triple and is already installed;
+# listing the other three would only make rustup download four standard libraries per CI run.
 [toolchain]
 channel = "1.97"
 components = ["rustfmt", "clippy"]
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "aarch64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-]

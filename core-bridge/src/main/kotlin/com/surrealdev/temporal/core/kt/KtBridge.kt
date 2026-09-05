@@ -99,7 +99,8 @@ internal object KtBridge {
                 JAVA_INT,
                 ADDRESS,
                 JAVA_INT,
-                JAVA_LONG,
+                JAVA_LONG, // timeout_millis
+                JAVA_LONG, // req_id
             ),
         )
     private val clientFreeFn = handle("kt_client_free", FunctionDescriptor.of(JAVA_INT, JAVA_LONG))
@@ -256,6 +257,7 @@ internal object KtBridge {
         service: Int,
         rpc: String,
         request: ByteArray,
+        timeoutMillis: Long,
         reqId: Long,
     ) = Arena.ofConfined().use { arena ->
         val name = rpc.toByteArray(Charsets.UTF_8)
@@ -268,6 +270,7 @@ internal object KtBridge {
                 name.size,
                 arena.bytes(request),
                 request.size,
+                timeoutMillis,
                 reqId,
             ) as Int,
             "kt_client_rpc",

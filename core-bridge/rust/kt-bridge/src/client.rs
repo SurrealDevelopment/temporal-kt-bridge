@@ -51,10 +51,14 @@ fn default_identity(configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
-    let host = std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "unknown-host".to_string());
+    // A real syscall, not $HOSTNAME: that is a shell variable and is not exported, so reading the
+    // environment produced "unknown-host" on macOS and in most containers.
+    let host = gethostname::gethostname().to_string_lossy().into_owned();
+    let host = if host.is_empty() {
+        "unknown-host".to_string()
+    } else {
+        host
+    };
     format!("{}@{}", std::process::id(), host)
 }
 

@@ -309,6 +309,15 @@ internal object WorkerOptionsProto {
             varint(value)
         }
 
+        fun bool(
+            number: Int,
+            value: Boolean,
+        ) {
+            if (!value) return
+            out.write((number shl 3) or 0)
+            out.write(1)
+        }
+
         fun message(
             number: Int,
             body: ByteArray,
@@ -319,7 +328,14 @@ internal object WorkerOptionsProto {
         }
         string(1, namespace)
         string(2, taskQueue)
+        // Empty means the bridge derives <pid>@<hostname>, so this is the worker's override only.
+        string(3, config.workerIdentity ?: "")
         int(4, config.maxCachedWorkflows)
+
+        // Negated on the wire so proto3's false default means "enabled".
+        bool(8, !config.enableActivities)
+        bool(14, !config.enableWorkflows)
+        bool(15, !config.enableLocalActivities)
 
         // Fixed slot counts. A resource-based supplier leaves these at 0 and sends limits below.
         int(5, config.workflowSlotSupplier.fixedSlotsOrZero())
