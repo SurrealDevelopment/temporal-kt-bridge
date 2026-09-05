@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use temporalio_client::GrpcCompression;
+use temporalio_client::{ClientTlsOptions, TlsOptions};
 use temporalio_client::{Connection, ConnectionOptions};
 
 use crate::error::{KtError, KtResult};
@@ -40,7 +41,38 @@ pub fn connection_options(config: &crate::proto::ClientOptions) -> KtResult<Conn
     if !config.client_version.is_empty() {
         headers.insert("client-version".to_string(), config.client_version.clone());
     }
+    // Any TLS field, or the bare flag, turns TLS on. An https:// target with tls_options None is
+    // refused by tonic outright, which is how the previous version of this made Temporal Cloud
+    // unreachable while every local test kept passing.
+    let wants_tls = config.tls
+        || !config.server_root_ca_cert.is_empty()
+        || !config.client_cert.is_empty()
+        || !config.client_private_key.is_empty()
+        || !config.tls_domain.is_empty();
+    let tls_options = if wants_tls {
+        let client_tls = (!config.client_cert.is_empty() || !config.client_private_key.is_empty())
+            .then(|| {
+                ClientTlsOptions::builder()
+                    .client_cert(config.client_cert.clone())
+                    .client_private_key(config.client_private_key.clone())
+                    .build()
+            });
+        Some(
+            TlsOptions::builder()
+                .maybe_server_root_ca_cert(
+                    (!config.server_root_ca_cert.is_empty())
+                        .then(|| config.server_root_ca_cert.clone()),
+                )
+                .maybe_domain(non_empty(&config.tls_domain))
+                .maybe_client_tls_options(client_tls)
+                .build(),
+        )
+    } else {
+        None
+    };
+
     Ok(ConnectionOptions::new(target)
+        .maybe_tls_options(tls_options)
         .maybe_headers((!headers.is_empty()).then_some(headers))
         // Defaulted rather than required: Core rejects an empty identity when a worker is built,
         // and failing there is a confusing place to learn that a client option was missing.
@@ -88,5 +120,57 @@ pub async fn connect(
             namespace,
         })),
         Err(err) => Err(format!("{err:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    fn base() -> crate::proto::ClientOptions {
+        crate::proto::ClientOptions {
+            target_url: "https://cloud.example:7233".into(),
+            namespace: "ns".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plain_http_has_no_tls() {
+        let mut cfg = base();
+        cfg.target_url = "http://localhost:7233".into();
+        let options = connection_options(&cfg).expect("options");
+        assert!(
+            options.tls_options.is_none(),
+            "an http:// target must not turn TLS on"
+        );
+    }
+
+    #[test]
+    fn the_bare_flag_turns_tls_on_with_system_roots() {
+        let mut cfg = base();
+        cfg.tls = true;
+        let options = connection_options(&cfg).expect("options");
+        let tls = options.tls_options.expect("tls on");
+        assert!(tls.server_root_ca_cert.is_none());
+        assert!(tls.client_tls_options.is_none());
+    }
+
+    #[test]
+    fn material_is_carried_through() {
+        let mut cfg = base();
+        cfg.server_root_ca_cert = vec![1, 2, 3];
+        cfg.tls_domain = "cloud.example".into();
+        cfg.client_cert = vec![4];
+        cfg.client_private_key = vec![5, 6];
+        let tls = connection_options(&cfg)
+            .expect("options")
+            .tls_options
+            .expect("tls on");
+        assert_eq!(tls.server_root_ca_cert.as_deref(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(tls.domain.as_deref(), Some("cloud.example"));
+        let client = tls.client_tls_options.expect("mTLS");
+        assert_eq!(client.client_cert, vec![4]);
+        assert_eq!(client.client_private_key, vec![5, 6]);
     }
 }

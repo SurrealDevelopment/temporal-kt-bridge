@@ -77,11 +77,11 @@ class PumpTest {
             // request must surface that rather than wait for a completion that never comes.
             val error =
                 withTimeout(5_000) {
-                    assertFailsWith<KtBridgeException> {
+                    assertFailsWith<com.surrealdev.temporal.core.TemporalCoreException> {
                         pump.request { KtBridge.clientConnect(runtime, ByteArray(0), 0) }
                     }
                 }
-            assertEquals(KtBridge.KT_ERR_INVALID_ARGUMENT, error.code)
+            assertEquals(KtBridge.KT_ERR_INVALID_ARGUMENT, error.statusCode)
         }
 
     @Test

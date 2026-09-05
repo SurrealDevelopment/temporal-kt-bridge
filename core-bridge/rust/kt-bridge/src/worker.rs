@@ -127,6 +127,12 @@ async fn pump(
         }
     }
     let _leaving = Leaving(live);
+    // Rebound AFTER `_leaving` on purpose. Locals drop in reverse order and parameters drop after
+    // all locals, so as a parameter `core` would outlive `_leaving`: the decrement would run
+    // while this pump still held its Arc<CoreWorker>, and shutdown()'s Arc::try_unwrap could
+    // fail spuriously and skip finalize_shutdown. As a later local it drops first.
+    let core = core;
+    let mut reported = false;
 
     loop {
         let polled = match kind {
@@ -164,39 +170,28 @@ async fn pump(
                 return;
             }
             Err(err) => {
-                // aux1 carries the stream kind: without it Kotlin knows a stream died but not
-                // which of its three channels to close.
-                sender.push(
-                    Pending::error(crate::runtime::PUSHED, KT_ERR_FAILED, err.to_string())
-                        .kind(KtKind::WorkerFailed)
-                        .aux0(worker_handle)
-                        .aux1(kind as u64),
-                );
-                // Still end the stream, so the consumer closes rather than waiting forever.
-                sender.push(
-                    Pending::ack(crate::runtime::PUSHED)
-                        .kind(KtKind::TaskStreamEnd)
-                        .aux0(worker_handle)
-                        .aux1(kind as u64),
-                );
-                return;
+                // Report it -- once -- but keep polling. Core's own shutdown for this stream is
+                // only released by poll() observing ShutDown, so a pump that quits on an error
+                // would leave finalize_shutdown waiting forever. Core streams yield Err items and
+                // continue; a bad namespace or credentials surface here as a stream of them, so
+                // the report is not repeated and the loop backs off between attempts.
+                if !reported {
+                    reported = true;
+                    // aux1 carries the stream kind: without it Kotlin knows a stream died but not
+                    // which of its three channels to close.
+                    sender.push(
+                        Pending::error(crate::runtime::PUSHED, KT_ERR_FAILED, err.to_string())
+                            .kind(KtKind::WorkerFailed)
+                            .aux0(worker_handle)
+                            .aux1(kind as u64),
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-/// Spawns the three poll loops.
-///
-/// Two things here are load-bearing and were wrong in the first draft:
-///
-///   * `JoinSet::spawn` calls `tokio::spawn`, which panics with "there is no reactor running"
-///     unless a runtime is entered. This runs on the JVM's calling thread, so the handle must be
-///     entered explicitly.
-///   * The pumps are *detached*, not held in a `JoinSet` owned by the state. A `JoinSet` aborts
-///     its tasks on drop, so replacing `Running` with `Draining` would have killed all three
-///     mid-`poll_*` -- precisely the "lang stopped polling before PollError::ShutDown" violation
-///     this module exists to make impossible. Each pump instead owns an `Arc<CoreWorker>` and
-///     runs to `ShutDown` on its own; `finalize` waits for them via the completion counter.
 pub fn start(
     entry: &Arc<WorkerEntry>,
     runtime: &Arc<crate::runtime::RuntimeEntry>,
@@ -384,12 +379,16 @@ fn tuner(
 /// `grace` bounds step 2. Exceeding it is reported rather than hidden, because silently
 /// finalizing early is how a stranded activity completion goes unnoticed.
 pub async fn shutdown(entry: Arc<WorkerEntry>, grace: std::time::Duration) -> Result<(), String> {
-    let core = {
+    let (core, started) = {
         let mut guard = entry.state.lock();
         match std::mem::replace(&mut *guard, WorkerState::Finalized) {
-            WorkerState::Running { core, .. } | WorkerState::Draining { core } => {
+            WorkerState::Running { core, started } => {
                 *guard = WorkerState::Draining { core: core.clone() };
-                core
+                (core, started)
+            }
+            WorkerState::Draining { core } => {
+                *guard = WorkerState::Draining { core: core.clone() };
+                (core, true)
             }
             WorkerState::Finalized => return Ok(()), // idempotent
         }
@@ -397,29 +396,72 @@ pub async fn shutdown(entry: Arc<WorkerEntry>, grace: std::time::Duration) -> Re
 
     core.initiate_shutdown();
 
+    if !started {
+        // No pumps were ever spawned, so nothing will poll the streams to ShutDown -- and Core's
+        // finalize_shutdown waits on exactly that, forever. Dropping the never-polled worker
+        // without finalizing is what the other SDKs do here.
+        *entry.state.lock() = WorkerState::Finalized;
+        drop(core);
+        return Ok(());
+    }
+
     let deadline = std::time::Instant::now() + grace;
-    let mut timed_out = false;
     while entry.live_pumps.load(Ordering::Acquire) > 0 {
         if std::time::Instant::now() >= deadline {
-            timed_out = true;
-            break;
+            // Stay in Draining: the pumps are still delivering tasks, and flipping to Finalized
+            // now would make every completion fail with WorkerShutDown while Core waits for
+            // exactly those completions -- a deadlock. Finalize in the background once the pumps
+            // really have ended, and tell the caller the truth about the grace period.
+            let bg = entry.clone();
+            entry.tokio.spawn(async move {
+                while bg.live_pumps.load(Ordering::Acquire) > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                // Nobody is waiting for this result any more; the caller was already told.
+                let _ = finalize(&bg, core, std::time::Instant::now() + grace).await;
+            });
+            return Err("shut down before every poll stream reported ShutDown".to_string());
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
+    finalize(
+        &entry,
+        core,
+        deadline.max(std::time::Instant::now() + grace),
+    )
+    .await
+}
+
+/// Moves to `Finalized` and lets Core finish, once every other reference is gone.
+async fn finalize(
+    entry: &WorkerEntry,
+    core: Arc<CoreWorker>,
+    deadline: std::time::Instant,
+) -> Result<(), String> {
     *entry.state.lock() = WorkerState::Finalized;
 
-    match Arc::try_unwrap(core) {
-        Ok(worker) => {
-            worker.finalize_shutdown().await;
-            if timed_out {
-                Err("shut down before every poll stream reported ShutDown".to_string())
-            } else {
-                Ok(())
+    // A pump that has just decremented live_pumps may still be a few instructions from dropping
+    // its Arc, and an in-flight complete()/heartbeat holds a clone for the length of the call.
+    // Neither is a leak, so wait for them rather than declaring the worker unfinalizable on the
+    // first attempt.
+    let mut core = core;
+    loop {
+        match Arc::try_unwrap(core) {
+            Ok(worker) => {
+                worker.finalize_shutdown().await;
+                return Ok(());
+            }
+            Err(shared) => {
+                if std::time::Instant::now() >= deadline {
+                    // Returned, never panicked: the C bridge's equivalent unwrapped here and
+                    // aborted the JVM.
+                    return Err("worker still referenced elsewhere; not finalized".to_string());
+                }
+                core = shared;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
-        // Returned, never panicked: the C bridge's equivalent unwrapped and aborted the JVM.
-        Err(_) => Err("worker still referenced elsewhere; not finalized".to_string()),
     }
 }
 

@@ -69,7 +69,12 @@ class TemporalWorker private constructor(
                     client.kt,
                     WorkerOptionsProto.encode(taskQueue, namespace, config),
                 )
-            worker.start()
+            try {
+                worker.start()
+            } catch (t: Throwable) {
+                worker.close()
+                throw t
+            }
             return TemporalWorker(worker, runtime)
         }
     }
@@ -331,6 +336,9 @@ internal object WorkerOptionsProto {
         // Empty means the bridge derives <pid>@<hostname>, so this is the worker's override only.
         string(3, config.workerIdentity ?: "")
         int(4, config.maxCachedWorkflows)
+        // Versioning itself is not wired through yet; the build id is still worth sending so
+        // history shows which build ran a task.
+        string(9, config.deploymentOptions?.version?.buildId ?: "")
 
         // Negated on the wire so proto3's false default means "enabled".
         bool(8, !config.enableActivities)

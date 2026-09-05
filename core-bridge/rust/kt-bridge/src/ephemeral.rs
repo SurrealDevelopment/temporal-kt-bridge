@@ -29,6 +29,10 @@ use crate::error::{KtError, KtResult};
 
 pub struct EphemeralEntry {
     server: Mutex<Option<EphemeralServer>>,
+    /// The runtime the server was started on. Drop needs it: kt_ephemeral_free from a JVM thread
+    /// has no current Tokio context, and `Handle::try_current()` there would silently skip the
+    /// shutdown and orphan the child process.
+    tokio: tokio::runtime::Handle,
     /// Captured at start so it stays readable after shutdown consumes the server.
     ///
     /// The C bridge read it straight off the server, which is why its accessor was documented as
@@ -63,10 +67,8 @@ impl EphemeralEntry {
 /// released the last reference.
 impl Drop for EphemeralEntry {
     fn drop(&mut self) {
-        if let Some(mut server) = self.server.lock().take()
-            && let Ok(handle) = tokio::runtime::Handle::try_current()
-        {
-            handle.spawn(async move {
+        if let Some(mut server) = self.server.lock().take() {
+            self.tokio.spawn(async move {
                 let _ = server.shutdown().await;
             });
         }
@@ -140,6 +142,8 @@ pub async fn start(
 
     Ok(Arc::new(EphemeralEntry {
         server: Mutex::new(Some(server)),
+        // Constructed inside a spawned request, so a runtime is current here.
+        tokio: tokio::runtime::Handle::current(),
         pid,
         target,
         has_test_service,

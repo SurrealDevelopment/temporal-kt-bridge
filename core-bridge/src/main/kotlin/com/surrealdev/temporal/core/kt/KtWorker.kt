@@ -83,14 +83,21 @@ internal class KtWorker private constructor(
         KtBridge.workerStart(runtime.handle, handle)
     }
 
+    // complete() and shutdown() run under NonCancellable. Cancelling a request drops Core's
+    // future mid-flight (the bridge races the cancellation token against the operation), and
+    // Core's completion path is not cancel-safe: the activation stays outstanding until the
+    // workflow task times out and its slot may never be released. A cancelled caller still gets
+    // its CancellationException afterwards; the operation simply finishes first.
     suspend fun complete(
         kind: KtTaskKind,
         proto: ByteArray,
     ) {
         runtime.ensureOpen()
         val completion =
-            runtime.pump.request { reqId ->
-                KtBridge.workerComplete(runtime.handle, handle, kind.code, proto, reqId)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                runtime.pump.request { reqId ->
+                    KtBridge.workerComplete(runtime.handle, handle, kind.code, proto, reqId)
+                }
             }
         if (completion.isFailure) {
             throw TemporalCoreException(
@@ -132,7 +139,11 @@ internal class KtWorker private constructor(
      */
     fun initiateShutdown() {
         if (closed) return
-        KtBridge.workerInitiateShutdown(handle)
+        try {
+            KtBridge.workerInitiateShutdown(handle)
+        } catch (e: KtBridgeException) {
+            throw e.asCore("could not initiate worker shutdown")
+        }
     }
 
     /**
@@ -141,8 +152,10 @@ internal class KtWorker private constructor(
     suspend fun shutdown(graceMillis: Long = 30_000L) {
         if (closed) return
         val completion =
-            runtime.pump.request { reqId ->
-                KtBridge.workerShutdown(runtime.handle, handle, graceMillis, reqId)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                runtime.pump.request { reqId ->
+                    KtBridge.workerShutdown(runtime.handle, handle, graceMillis, reqId)
+                }
             }
         closed = true
         if (completion.isFailure) {

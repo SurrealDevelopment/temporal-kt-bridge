@@ -74,4 +74,36 @@ class ClientOptionsProtoTest {
         val f = fields(ClientOptionsProto.encode("http://x", "ns", identity = "", apiKey = ""))
         assertTrue(3 !in f && 4 !in f && 5 !in f && 6 !in f && 8 !in f, "unset options must not be sent")
     }
+
+    @Test
+    fun `tls flag and material reach the wire`() {
+        val f =
+            fields(
+                ClientOptionsProto.encode(
+                    targetUrl = "https://cloud.example:7233",
+                    namespace = "ns",
+                    identity = "",
+                    apiKey = "",
+                    tls = true,
+                    tlsConfig =
+                        TlsConfig(
+                            serverRootCaCert = byteArrayOf(1, 2, 3),
+                            domain = "cloud.example",
+                            clientCert = byteArrayOf(4),
+                            clientPrivateKey = byteArrayOf(5, 6),
+                        ),
+                ),
+            )
+        assertEquals(1, f.getValue(9)[0].toInt(), "tls")
+        assertEquals(listOf<Byte>(1, 2, 3), f.getValue(10).toList())
+        assertEquals("cloud.example", String(f.getValue(11)))
+        assertEquals(listOf<Byte>(4), f.getValue(12).toList())
+        assertEquals(listOf<Byte>(5, 6), f.getValue(13).toList())
+    }
+
+    @Test
+    fun `plain http sends no tls at all`() {
+        val f = fields(ClientOptionsProto.encode("http://localhost:7233", "ns", identity = "", apiKey = ""))
+        assertTrue((9..13).none { it in f }, "an http:// target must not turn TLS on")
+    }
 }

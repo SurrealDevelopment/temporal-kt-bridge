@@ -24,6 +24,9 @@ class TemporalDevServer private constructor(
     @Volatile
     private var closed = false
 
+    @Volatile
+    private var shutDown = false
+
     override val targetUrl: String get() = kt.target
 
     /**
@@ -34,7 +37,7 @@ class TemporalDevServer private constructor(
      * process. Exposing this at all needed a carried fork patch on the previous bridge, even
      * though `child_process_id()` has always been public Rust API.
      */
-    override val pid: Long? get() = if (closed) null else kt.pid.takeIf { it > 0 }?.toLong()
+    override val pid: Long? get() = if (closed || shutDown) null else kt.pid.takeIf { it > 0 }?.toLong()
 
     override fun isClosed(): Boolean = closed
 
@@ -79,6 +82,7 @@ class TemporalDevServer private constructor(
 
     suspend fun shutdown() {
         if (closed) return
+        shutDown = true
         kt.shutdown()
     }
 

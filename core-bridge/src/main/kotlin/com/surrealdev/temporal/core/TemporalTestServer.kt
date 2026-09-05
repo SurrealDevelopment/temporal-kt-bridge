@@ -53,6 +53,9 @@ class TemporalTestServer private constructor(
     @Volatile
     private var closed = false
 
+    @Volatile
+    private var shutDown = false
+
     override val targetUrl: String get() = kt.target
 
     /**
@@ -61,7 +64,7 @@ class TemporalTestServer private constructor(
      * Null after [close] on purpose: the process is gone, and the OS is free to hand that number
      * to something else.
      */
-    override val pid: Long? get() = if (closed) null else kt.pid.takeIf { it > 0 }?.toLong()
+    override val pid: Long? get() = if (closed || shutDown) null else kt.pid.takeIf { it > 0 }?.toLong()
 
     override fun isClosed(): Boolean = closed
 
@@ -178,6 +181,7 @@ class TemporalTestServer private constructor(
 
     suspend fun shutdown() {
         if (closed) return
+        shutDown = true
         kt.shutdown()
     }
 

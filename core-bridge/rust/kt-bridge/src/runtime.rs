@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions as CoreRuntimeOptions, TokioRuntimeBuilder};
@@ -22,6 +23,9 @@ pub struct RuntimeEntry {
     /// answered with `KT_ERR_SHUTDOWN`, so the JVM never waits on a completion that will not come.
     /// The previous bridge had no such guarantee and blocked on a 60-second latch instead.
     pending: Mutex<HashMap<u64, CancellationToken>>,
+    /// Set by shutdown. A request registered after this point would otherwise never be answered:
+    /// the drain has already run, so nothing would retire it.
+    closed: AtomicBool,
 }
 
 impl RuntimeEntry {
@@ -29,11 +33,21 @@ impl RuntimeEntry {
         self.queue.sender()
     }
 
-    /// Registers an operation and returns its cancellation token.
-    pub fn register(&self, req_id: u64) -> CancellationToken {
+    /// Registers an operation and returns its cancellation token, or None once the runtime is
+    /// shutting down -- the caller must then answer the request itself.
+    pub fn register(&self, req_id: u64) -> Option<CancellationToken> {
+        let mut pending = self.pending.lock();
+        // Checked under the lock so it cannot interleave with the drain, which takes the same
+        // lock: either this entry is drained, or None is returned. Never neither.
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
         let token = CancellationToken::new();
-        self.pending.lock().insert(req_id, token.clone());
-        token
+        let previous = pending.insert(req_id, token.clone());
+        // Ids are minted by the JVM's pump and never reused; a duplicate means the earlier
+        // request would never be answered.
+        debug_assert!(previous.is_none(), "duplicate req_id {req_id}");
+        Some(token)
     }
 
     /// Retires an operation. Returns false if it was already retired, which is how a cancellation
@@ -52,6 +66,12 @@ impl RuntimeEntry {
     fn drain_pending_for_shutdown(&self) {
         let outstanding: Vec<u64> = {
             let mut pending = self.pending.lock();
+            self.closed.store(true, Ordering::Release);
+            // Cancel, not just forget: an in-flight operation (a 30 s worker shutdown, a long
+            // poll) would otherwise keep running on the Tokio runtime we are about to drop.
+            for token in pending.values() {
+                token.cancel();
+            }
             let ids = pending.keys().copied().collect();
             pending.clear();
             ids
@@ -91,6 +111,7 @@ pub fn new_runtime(config: crate::proto::RuntimeOptions) -> KtResult<Arc<Runtime
         core,
         queue: Queue::new(),
         pending: Mutex::new(HashMap::new()),
+        closed: AtomicBool::new(false),
     }))
 }
 
@@ -131,9 +152,21 @@ pub fn spawn_request<F>(entry: &Arc<RuntimeEntry>, req_id: u64, op: F)
 where
     F: std::future::Future<Output = Pending> + Send + 'static,
 {
-    let token = entry.register(req_id);
     let sender = entry.sender();
-    let owner = entry.clone();
+    let Some(token) = entry.register(req_id) else {
+        // Registered after the drain: nothing would ever retire it, so answer here.
+        sender.push(Pending::error(
+            req_id,
+            KT_ERR_SHUTDOWN,
+            "runtime is shutting down",
+        ));
+        return;
+    };
+    // Weak, deliberately. A strong reference from a spawned task can become the last one when
+    // the JVM frees the runtime while the task is in flight, which would drop the Tokio runtime
+    // from inside one of its own worker threads -- Tokio panics on that. With Weak the last
+    // reference is always the handle table's, released on the JVM thread in kt_runtime_free.
+    let owner = Arc::downgrade(entry);
     entry.core.tokio_handle().spawn(async move {
         let result = tokio::select! {
             biased;
@@ -148,10 +181,31 @@ where
             },
         };
         // Only the first of completion / cancellation / shutdown gets to answer.
-        if owner.retire(req_id) {
+        let delivered = owner.upgrade().is_some_and(|owner| owner.retire(req_id));
+        if delivered {
             sender.push(result);
+        } else {
+            release_discarded(&result);
         }
     });
+}
+
+/// A completion that lost its race still may have created something.
+///
+/// `kt_client_new` and `kt_ephemeral_start` insert their handle before the completion is pushed.
+/// If the completion is then discarded -- cancelled or drained at the same moment it finished --
+/// the JVM never learns the handle, so nothing would ever free it: a client connection, or worse
+/// an ephemeral server whose child process outlives the JVM. Remove it here so its Drop runs.
+fn release_discarded(result: &Pending) {
+    if result.status != crate::abi::KT_OK {
+        return;
+    }
+    let kind = match result.kind {
+        crate::abi::KtKind::ClientConnected => crate::handle::KIND_CLIENT,
+        crate::abi::KtKind::EphemeralStarted => crate::handle::KIND_EPHEMERAL,
+        _ => return,
+    };
+    let _ = crate::HANDLES.remove_of_kind(result.aux0, kind);
 }
 
 #[cfg(test)]

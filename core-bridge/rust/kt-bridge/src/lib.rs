@@ -271,6 +271,13 @@ kt_export! {
             .tokio_handle()
             .block_on(async { temporalio_sdk_core::init_worker(&rt.core, config, cl.connection.clone()) })
             .map_err(KtError::from)?;
+        // One DescribeNamespace, as sdk-python does. Without it a wrong namespace or bad
+        // credentials only surface later as a stream of poll errors, by which time the caller's
+        // create() has long since returned success.
+        rt.core
+            .tokio_handle()
+            .block_on(core.validate())
+            .map_err(|e| KtError::InvalidArgument(format!("worker validation failed: {e}")))?;
 
         let entry = std::sync::Arc::new(worker::WorkerEntry::new(
             std::sync::Arc::new(core),
@@ -376,7 +383,25 @@ kt_export! {
 
 kt_export! {
     fn kt_worker_free(worker: u64) {
-        HANDLES.remove_of_kind(worker, handle::KIND_WORKER)?;
+        let removed = HANDLES.remove_of_kind(worker, handle::KIND_WORKER)?;
+        if let Entry::Worker(entry) = removed {
+            // Freed without a shutdown: the three detached pumps would otherwise keep polling
+            // Core forever, receiving tasks nobody is listening for. Tell Core to stop so they
+            // exit on ShutDown and drop the last references. Not a graceful finalize -- that is
+            // what kt_worker_shutdown is for -- but never a leak.
+            let core = {
+                let mut guard = entry.state.lock();
+                match std::mem::replace(&mut *guard, worker::WorkerState::Finalized) {
+                    worker::WorkerState::Running { core, .. }
+                    | worker::WorkerState::Draining { core } => Some(core),
+                    worker::WorkerState::Finalized => None,
+                }
+            };
+            if let Some(core) = core {
+                let _guard = entry.tokio.enter();
+                core.initiate_shutdown();
+            }
+        }
         Ok(())
     }
 }

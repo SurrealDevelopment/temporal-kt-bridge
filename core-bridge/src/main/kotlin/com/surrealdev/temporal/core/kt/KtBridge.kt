@@ -1,5 +1,6 @@
 package com.surrealdev.temporal.core.kt
 
+import com.surrealdev.temporal.core.TemporalCoreException
 import com.surrealdev.temporal.core.internal.NativeLoader
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
@@ -196,7 +197,13 @@ internal object KtBridge {
         }
 
     private fun Arena.bytes(value: ByteArray): MemorySegment =
-        if (value.isEmpty()) MemorySegment.NULL else allocateFrom(JAVA_BYTE, *value)
+        if (value.isEmpty()) {
+            MemorySegment.NULL
+        } else {
+            // Not allocateFrom(JAVA_BYTE, *value): the spread copies the array once before FFM
+            // copies it again, and this is on the path of every payload.
+            allocate(value.size.toLong()).also { it.copyFrom(MemorySegment.ofArray(value)) }
+        }
 
     private fun check(
         code: Int,
@@ -365,4 +372,18 @@ internal object KtBridge {
 internal class KtBridgeException(
     val code: Int,
     message: String,
-) : RuntimeException(message)
+) : RuntimeException(message) {
+    /**
+     * The public-API form. Callers of the wrappers catch [TemporalCoreException]; an internal
+     * exception escaping through them (a stale handle after runtime close, a completion after
+     * shutdown) would bypass every such handler.
+     */
+    fun asCore(context: String): TemporalCoreException =
+        TemporalCoreException(
+            message = "$context: $message",
+            errorType = null,
+            statusCode = code,
+            cause = this,
+            writableStackTrace = true,
+        )
+}

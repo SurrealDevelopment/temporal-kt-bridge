@@ -52,6 +52,15 @@ message ClientOptions {
   uint64 connect_timeout_millis = 7;
   // Negated so proto3's false default keeps Core's own default (gzip on).
   bool no_compression = 8;
+
+  // TLS. `tls` alone means "TLS with the system roots" (an https:// target, an API key); the
+  // remaining fields refine it. tonic refuses an https:// target with no TLS configuration at
+  // all, so without this Temporal Cloud is unreachable.
+  bool tls = 9;
+  bytes server_root_ca_cert = 10;
+  string tls_domain = 11;
+  bytes client_cert = 12;
+  bytes client_private_key = 13;
 }
 
 message WorkerOptions {

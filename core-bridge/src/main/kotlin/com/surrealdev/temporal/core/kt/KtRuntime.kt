@@ -55,7 +55,26 @@ internal class KtRuntime private constructor(
         synchronized(this) {
             if (closed) return
             closed = true
-            // Free first: this answers outstanding requests and closes the queue, which is what
+            // End every worker's task streams first. Freeing the runtime stops the pumps that
+            // would have delivered TASK_STREAM_END, so a coroutine suspended in poll*() would
+            // otherwise wait forever -- the runTest-hang class of bug.
+            pushedHandlers.forEach { (worker, handler) ->
+                for (stream in 0L..2L) {
+                    runCatching {
+                        handler(
+                            Completion(
+                                reqId = 0L,
+                                kind = Kind.TASK_STREAM_END,
+                                status = KtBridge.KT_OK,
+                                payload = ByteArray(0),
+                                aux0 = worker,
+                                aux1 = stream,
+                            ),
+                        )
+                    }
+                }
+            }
+            // Free next: this answers outstanding requests and closes the queue, which is what
             // lets the pump's blocking poll return instead of parking forever.
             KtBridge.runtimeFree(handle)
             pump.close()
@@ -69,7 +88,15 @@ internal class KtRuntime private constructor(
          */
         fun create(config: ByteArray = ByteArray(0)): KtRuntime =
             try {
-                KtRuntime(KtBridge.runtimeNew(config))
+                val handle = KtBridge.runtimeNew(config)
+                try {
+                    KtRuntime(handle)
+                } catch (t: Throwable) {
+                    // The pump's poller is created in the constructor; if that fails the runtime
+                    // handle would otherwise be lost, and with it a live Tokio runtime.
+                    KtBridge.runtimeFree(handle)
+                    throw t
+                }
             } catch (e: KtBridgeException) {
                 throw TemporalCoreException(
                     message = "could not create the Temporal runtime: ${e.message}",

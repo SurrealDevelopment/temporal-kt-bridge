@@ -68,6 +68,11 @@ internal class Pump(
     @Volatile
     private var running = true
 
+    /** Set once the pump thread has exited; a request issued after this can never be answered. */
+
+    @Volatile
+    private var dead = false
+
     // A platform thread, never virtual: kt_poller_poll blocks, and a blocking downcall pins its
     // carrier, which would starve the scheduler.
     private val thread =
@@ -94,36 +99,61 @@ internal class Pump(
         val reqId = nextRequestId()
         return suspendCancellableCoroutine { continuation ->
             pending[reqId] = continuation
-            continuation.invokeOnCancellation {
-                // Rust still answers exactly once; the completion is simply discarded because the
-                // continuation is already gone.
-                KtBridge.cancel(runtime, reqId)
+            if (dead) {
+                // Ordered after the insert on purpose: failPending() runs after `dead` is set, so
+                // a request that slips in between is either seen by it or fails here. Never
+                // neither.
+                pending.remove(reqId)
+                continuation.resumeWithException(
+                    KtBridgeException(KtBridge.KT_ERR_SHUTDOWN, "bridge pump has stopped; request $reqId not issued"),
+                )
+                return@suspendCancellableCoroutine
             }
             try {
                 start(reqId)
             } catch (t: Throwable) {
                 pending.remove(reqId)
-                if (continuation.isActive) continuation.resumeWithException(t)
+                // A bridge-level failure to even issue the request surfaces in the public form.
+                val mapped = if (t is KtBridgeException) t.asCore("request could not be issued") else t
+                if (continuation.isActive) continuation.resumeWithException(mapped)
+                return@suspendCancellableCoroutine
+            }
+            // Registered AFTER start(): Rust only knows the id once start() has issued it, so a
+            // cancel that landed before then was a no-op and the operation would run to completion
+            // with nobody listening -- leaking whatever it created. If the coroutine is already
+            // cancelled by now, the handler runs immediately and kt_cancel finds the id.
+            continuation.invokeOnCancellation {
+                // Rust still answers exactly once; the completion is simply discarded because the
+                // continuation is already gone.
+                KtBridge.cancel(runtime, reqId)
             }
         }
     }
 
     private fun run() {
-        Arena.ofShared().use { arena ->
-            val batch = arena.allocate(KtBridge.RECORD_BYTES * BATCH, 8)
-            val count = arena.allocate(JAVA_INT)
-            while (running) {
-                val rc = KtBridge.poll(poller, batch, BATCH, POLL_TIMEOUT_MILLIS, count)
-                if (rc != KtBridge.KT_OK) {
-                    // The queue is closed, or the poller is gone: either way there is nothing
-                    // more to drain.
-                    if (running) logger.debug("pump stopping, poll returned {}", rc)
-                    break
+        try {
+            Arena.ofShared().use { arena ->
+                val batch = arena.allocate(KtBridge.RECORD_BYTES * BATCH, 8)
+                val count = arena.allocate(JAVA_INT)
+                while (running) {
+                    val rc = KtBridge.poll(poller, batch, BATCH, POLL_TIMEOUT_MILLIS, count)
+                    if (rc != KtBridge.KT_OK) {
+                        // The queue is closed, or the poller is gone: either way there is nothing
+                        // more to drain.
+                        if (running) logger.debug("pump stopping, poll returned {}", rc)
+                        break
+                    }
+                    repeat(count.get(JAVA_INT, 0)) { dispatch(batch, it * KtBridge.RECORD_BYTES) }
                 }
-                repeat(count.get(JAVA_INT, 0)) { dispatch(batch, it * KtBridge.RECORD_BYTES) }
             }
+        } catch (t: Throwable) {
+            logger.error("pump thread died; failing every outstanding request", t)
+        } finally {
+            // In `finally`, not after the loop: if dispatch throws, the thread dies, and without
+            // this every suspended caller -- and every future one -- would wait forever.
+            dead = true
+            failPending()
         }
-        failPending()
     }
 
     private fun dispatch(
@@ -157,9 +187,24 @@ internal class Pump(
                 .onFailure { logger.error("pushed completion handler threw", it) }
             return
         }
-        // A cancelled request is already gone from the map; its completion is simply dropped.
-        pending.remove(completion.reqId)?.let { continuation ->
-            if (continuation.isActive) continuation.resume(completion)
+        // A cancelled request is already gone from the map; its completion is dropped -- but not
+        // what it may have created. A client or server that finished connecting/starting after
+        // its caller gave up would otherwise sit in the native handle table forever, unknown to
+        // anyone, with a child process outliving the JVM.
+        val continuation = pending.remove(completion.reqId)
+        if (continuation != null && continuation.isActive) {
+            continuation.resume(completion)
+        } else {
+            releaseDiscarded(completion)
+        }
+    }
+
+    private fun releaseDiscarded(completion: Completion) {
+        if (completion.isFailure) return
+        when (completion.kind) {
+            Kind.EPHEMERAL_STARTED -> KtBridge.ephemeralFree(completion.aux0) // Drop shuts the server down
+            Kind.CLIENT_CONNECTED -> KtBridge.clientFree(completion.aux0)
+            else -> Unit
         }
     }
 

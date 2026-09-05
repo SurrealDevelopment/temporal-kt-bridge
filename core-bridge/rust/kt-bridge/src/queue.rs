@@ -248,7 +248,7 @@ impl PollerEntry {
         }
         let _guard = InPoll(&self.in_poll);
 
-        let drained: Vec<Pending> = {
+        let drained = {
             let mut state = self.shared.state.lock();
             let deadline = (timeout_millis > 0).then(|| {
                 std::time::Instant::now() + std::time::Duration::from_millis(timeout_millis as u64)
@@ -283,11 +283,19 @@ impl PollerEntry {
             }
 
             let take = (cap as usize).min(state.queue.len());
-            state.queue.drain(..take).collect()
+            let closed = state.closed;
+            (state.queue.drain(..take).collect::<Vec<_>>(), closed)
         };
+        let (drained, closed) = drained;
 
         if drained.is_empty() {
-            return Ok(0);
+            // Closed and empty must be an error: Ok(0) here would have the pump loop spin at
+            // full CPU re-polling a queue that can never fill again.
+            return if closed {
+                Err(KtError::Shutdown)
+            } else {
+                Ok(0)
+            };
         }
 
         let mut buf = self.buf.lock();
@@ -466,7 +474,15 @@ mod tests {
                 aux0: 0,
                 aux1: 0,
             }; 1];
-            assert_eq!(unsafe { poller.poll(out.as_mut_ptr(), 1, -1) }.unwrap(), 0);
+            // Err(Shutdown), not Ok(0): an empty batch would have the pump loop spin re-polling
+            // a queue that can never fill again, at full CPU, until someone closes the pump.
+            assert!(
+                matches!(
+                    unsafe { poller.poll(out.as_mut_ptr(), 1, -1) },
+                    Err(KtError::Shutdown)
+                ),
+                "a closed, drained queue reports shutdown so the pump loop ends"
+            );
         }
     }
 

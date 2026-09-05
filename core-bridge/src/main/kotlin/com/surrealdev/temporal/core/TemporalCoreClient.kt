@@ -105,6 +105,9 @@ class TemporalCoreClient private constructor(
                         noCompression = options.grpcCompression == GrpcCompression.NONE,
                         clientName = options.clientName,
                         clientVersion = options.clientVersion,
+                        // https:// means TLS, with the system roots unless a config says otherwise.
+                        tls = normalizedUrl.startsWith("https://", ignoreCase = true),
+                        tlsConfig = if (tlsDisabled) null else tls,
                     ),
                 )
             return TemporalCoreClient(client, runtime, normalizedUrl, namespace)
@@ -173,8 +176,25 @@ internal object ClientOptionsProto {
         noCompression: Boolean = false,
         clientName: String = "",
         clientVersion: String = "",
+        tls: Boolean = false,
+        tlsConfig: TlsConfig? = null,
     ): ByteArray {
         val out = java.io.ByteArrayOutputStream()
+
+        fun bytesField(
+            number: Int,
+            bytes: ByteArray?,
+        ) {
+            if (bytes == null || bytes.isEmpty()) return
+            out.write((number shl 3) or 2)
+            var length = bytes.size
+            while (length >= 0x80) {
+                out.write((length and 0x7F) or 0x80)
+                length = length ushr 7
+            }
+            out.write(length)
+            out.write(bytes)
+        }
 
         fun field(
             number: Int,
@@ -201,6 +221,14 @@ internal object ClientOptionsProto {
             out.write((8 shl 3) or 0)
             out.write(1)
         }
+        if (tls) {
+            out.write((9 shl 3) or 0)
+            out.write(1)
+        }
+        bytesField(10, tlsConfig?.serverRootCaCert)
+        field(11, tlsConfig?.domain.orEmpty())
+        bytesField(12, tlsConfig?.clientCert)
+        bytesField(13, tlsConfig?.clientPrivateKey)
         return out.toByteArray()
     }
 }
