@@ -23,8 +23,8 @@ val nativePlatforms =
     listOf(
         NativePlatform("linux-x86_64-gnu", "linux-x86_64-gnu"),
         NativePlatform("linux-aarch64-gnu", "linux-aarch64-gnu"),
-        // Future: NativePlatform("linux-x86_64-musl", "linux-x86_64-musl"),
-        // Future: NativePlatform("linux-aarch64-musl", "linux-aarch64-musl"),
+        NativePlatform("linux-x86_64-musl", "linux-x86_64-musl"),
+        NativePlatform("linux-aarch64-musl", "linux-aarch64-musl"),
         NativePlatform("macos-aarch64", "macos-aarch64"),
         NativePlatform("windows-x86_64", "windows-x86_64"),
     )
@@ -77,6 +77,12 @@ val skipNativeBuild = project.findProperty("skipNativeBuild")?.toString()?.toBoo
  * `target` is null for the host build, which cargo writes to `target/release` rather than
  * `target/<triple>/release`.
  *
+ * `zig` selects `cargo zigbuild`, which cross-compiles every Linux flavour from one runner. For
+ * gnu targets `glibc` pins the floor the library links against: the natives used to be built on
+ * whatever glibc the runner had (2.39 on ubuntu-24.04), which fails with an obscure
+ * UnsatisfiedLinkError on Debian 12 (2.36), Ubuntu 22.04 (2.35) or RHEL 9 (2.34). 2.17 is Rust's
+ * own minimum and covers RHEL 7 onwards. musl targets take no floor and are what Alpine loads.
+ *
  * kt-bridge depends on sdk-core from crates.io, so cargo resolves and caches it like any other
  * dependency -- there is no vendored source tree to declare as an input. The inputs below are
  * this crate and its lockfile, which is the whole of what we own.
@@ -86,9 +92,14 @@ fun registerNativeBuild(
     resourceDir: String,
     target: String?,
     libFile: String,
-): TaskProvider<Copy> {
+    zig: Boolean = false,
+    glibc: String? = null,
+): TaskProvider<Sync> {
+    // zigbuild's `<triple>.<glibc>` spelling is a request, not a directory: output still lands in
+    // target/<triple>/release.
     val outDir = if (target == null) "release" else "$target/release"
     val builtLib = "rust/kt-bridge/target/$outDir/$libFile"
+    val requested = if (target != null && glibc != null) "$target.$glibc" else target
 
     val build =
         tasks.register<Exec>("cargoBuild$name") {
@@ -97,8 +108,8 @@ fun registerNativeBuild(
             workingDir = file("rust/kt-bridge")
             commandLine(
                 buildList {
-                    addAll(listOf("cargo", "build", "--release", "--locked"))
-                    if (target != null) addAll(listOf("--target", target))
+                    addAll(listOf("cargo", if (zig) "zigbuild" else "build", "--release", "--locked"))
+                    if (requested != null) addAll(listOf("--target", requested))
                 },
             )
 
@@ -109,24 +120,31 @@ fun registerNativeBuild(
                 },
             )
             outputs.file(builtLib)
+            // The guard lives HERE, on the cargo task, not on the copy. A `Copy` whose source is
+            // missing is not merely a no-op: Gradle marks it NO-SOURCE and skips it entirely,
+            // doLast included -- which is how a musl build that emitted an rlib instead of a
+            // cdylib went green with nothing to ship. An Exec task always runs its actions.
+            // `builtFile` is a RegularFile hoisted out of the action so the configuration cache
+            // does not have to serialise the build script.
+            val builtFile = layout.projectDirectory.file(builtLib)
+            doLast {
+                if (!builtFile.asFile.isFile) {
+                    throw GradleException(
+                        "cargo reported success but produced no library at $builtLib -- " +
+                            "check for 'dropping unsupported crate type' in the output",
+                    )
+                }
+            }
         }
 
-    // Hoisted out of the task action: referencing the script-level `nativeLibsDir` from inside
-    // `doLast` would capture the build script itself, which the configuration cache rejects.
-    val destFile = nativeLibsDir.map { it.dir("native/$resourceDir").file(libFile) }
-
-    return tasks.register<Copy>("copyNativeLib$name") {
-        description = "Copy the $resourceDir native library into the build directory"
+    // Sync, not Copy: it removes anything else in the destination, so a library from a previous
+    // build (or a previous bridge) cannot ride along into the classifier JAR next to the new one.
+    return tasks.register<Sync>("copyNativeLib$name") {
+        description = "Place the $resourceDir native library into the build directory"
         group = "build"
         dependsOn(build)
         from(builtLib)
         into(nativeLibsDir.map { it.dir("native/$resourceDir") })
-        // A silently empty classifier JAR is the failure this guards: `Copy` no-ops when its
-        // source is missing, so a mis-pathed build would publish nothing and still go green.
-        doLast {
-            val dest = destFile.get().asFile
-            if (!dest.isFile) throw GradleException("native library missing after copy: $dest")
-        }
     }
 }
 
@@ -139,11 +157,43 @@ val copyNativeLib =
         libFile = "$libPrefix$nativeLibName.$libExtension",
     )
 
-// Cross/CI builds, one per shipped classifier.
+// Cross/CI builds, one per shipped classifier. Linux is cross-compiled with zig from one runner;
+// macOS and Windows build natively on their own runners.
+val glibcFloor = "2.17"
 val copyNativeLibLinuxx8664 =
-    registerNativeBuild("Linuxx8664", "linux-x86_64-gnu", "x86_64-unknown-linux-gnu", "lib$nativeLibName.so")
+    registerNativeBuild(
+        "Linuxx8664",
+        "linux-x86_64-gnu",
+        "x86_64-unknown-linux-gnu",
+        "lib$nativeLibName.so",
+        zig = true,
+        glibc = glibcFloor,
+    )
 val copyNativeLibLinuxAarch64 =
-    registerNativeBuild("LinuxAarch64", "linux-aarch64-gnu", "aarch64-unknown-linux-gnu", "lib$nativeLibName.so")
+    registerNativeBuild(
+        "LinuxAarch64",
+        "linux-aarch64-gnu",
+        "aarch64-unknown-linux-gnu",
+        "lib$nativeLibName.so",
+        zig = true,
+        glibc = glibcFloor,
+    )
+val copyNativeLibLinuxx8664Musl =
+    registerNativeBuild(
+        "Linuxx8664Musl",
+        "linux-x86_64-musl",
+        "x86_64-unknown-linux-musl",
+        "lib$nativeLibName.so",
+        zig = true,
+    )
+val copyNativeLibLinuxAarch64Musl =
+    registerNativeBuild(
+        "LinuxAarch64Musl",
+        "linux-aarch64-musl",
+        "aarch64-unknown-linux-musl",
+        "lib$nativeLibName.so",
+        zig = true,
+    )
 val copyNativeLibWindowsx8664 =
     registerNativeBuild("Windowsx8664", "windows-x86_64", "x86_64-pc-windows-msvc", "$nativeLibName.dll")
 val copyNativeLibMacosAarch64 =
@@ -155,6 +205,8 @@ val copyAllNativeLibs by tasks.registering {
     dependsOn(
         copyNativeLibLinuxx8664,
         copyNativeLibLinuxAarch64,
+        copyNativeLibLinuxx8664Musl,
+        copyNativeLibLinuxAarch64Musl,
         copyNativeLibWindowsx8664,
         copyNativeLibMacosAarch64,
     )
@@ -162,9 +214,14 @@ val copyAllNativeLibs by tasks.registering {
 
 // Platform-specific aggregator tasks for CI matrix builds
 val copyLinuxNativeLibs by tasks.registering {
-    description = "Copy Linux native libraries (for Linux CI runner)"
+    description = "Copy all four Linux native libraries (gnu + musl, x86_64 + aarch64), cross-built with zig"
     group = "build"
-    dependsOn(copyNativeLibLinuxx8664, copyNativeLibLinuxAarch64)
+    dependsOn(
+        copyNativeLibLinuxx8664,
+        copyNativeLibLinuxAarch64,
+        copyNativeLibLinuxx8664Musl,
+        copyNativeLibLinuxAarch64Musl,
+    )
 }
 
 val copyMacosAarch64NativeLib by tasks.registering {

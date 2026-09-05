@@ -1,0 +1,8 @@
+# musl targets default to a statically linked CRT, and rustc refuses to build a cdylib that way
+# ("dropping unsupported crate type `cdylib`"). Link musl dynamically instead: Alpine ships the
+# musl dynamic loader, which is what the JVM's System.load needs anyway.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]

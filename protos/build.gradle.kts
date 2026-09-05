@@ -163,7 +163,8 @@ val verifyProtoPin by tasks.registering {
     outputs.upToDateWhen { true }
 
     doLast {
-        val expected = manifest.readText()
+        // Same normalisation as the hashes themselves: the manifest file may be checked out CRLF.
+        val expected = manifest.readText().replace("\r\n", "\n")
         val actual = protoManifest(protoRoot)
         if (expected != actual) {
             val exp = expected.lines().filter { it.isNotBlank() }.toSet()

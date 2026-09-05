@@ -37,7 +37,7 @@ worker is a `WorkerState::Finalized` variant with no field to unwrap.
 
 ```bash
 ./gradlew :core-bridge:build          # host platform
-./gradlew :core-bridge:copyAllNativeLibs   # all four shipped classifiers
+./gradlew :core-bridge:copyAllNativeLibs   # all six shipped classifiers (Linux ones need cargo-zigbuild: pip install cargo-zigbuild)
 ```
 
 Requires a Rust toolchain matching `rust/kt-bridge/rust-toolchain.toml` and `protoc`. Cross

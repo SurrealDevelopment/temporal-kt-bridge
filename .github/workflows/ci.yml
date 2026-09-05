@@ -71,30 +71,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # All four Linux flavours are cross-compiled with zig from this one runner: gnu against a
+          # pinned glibc floor (see glibcFloor in core-bridge/build.gradle.kts), and musl for
+          # Alpine. Building on the runner's own glibc produced libraries that would not load on
+          # Debian 12 / Ubuntu 22.04 / RHEL 9.
           - os: ubuntu-24.04
-            platform: linux-x86_64-gnu
-            rust-targets: x86_64-unknown-linux-gnu
-            gradle-task: copyNativeLibLinuxx8664
-            artifact-name: native-libs-linux-x86_64-gnu
-            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
-          - os: ubuntu-24.04-arm
-            platform: linux-aarch64-gnu
-            rust-targets: aarch64-unknown-linux-gnu
-            gradle-task: copyNativeLibLinuxAarch64
-            artifact-name: native-libs-linux-aarch64-gnu
-            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
+            platform: linux
+            rust-targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+            gradle-task: copyLinuxNativeLibs
+            artifact-name: native-libs-linux
+            artifact-path: core-bridge/build/native-libs/native
+            expected-libs: 4
+            zig: true
           - os: macos-14
             platform: macos-aarch64
             rust-targets: aarch64-apple-darwin
             gradle-task: copyMacosAarch64NativeLib
             artifact-name: native-libs-macos-aarch64
             artifact-path: core-bridge/build/native-libs/native/macos-aarch64
+            expected-libs: 1
           - os: windows-latest
             platform: windows-x86_64
             rust-targets: x86_64-pc-windows-msvc
             gradle-task: copyWindowsNativeLib
             artifact-name: native-libs-windows
             artifact-path: core-bridge/build/native-libs/native/windows-x86_64
+            expected-libs: 1
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -125,6 +127,17 @@ jobs:
       - name: Install protobuf (Linux)
         if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install zig + cargo-zigbuild (Linux cross builds)
+        if: steps.native-cache.outputs.cache-hit != 'true' && matrix.zig
+        run: pip3 install --user cargo-zigbuild && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # From inside the crate directory on purpose: that is where rust-toolchain.toml pins the
+      # compiler, and `rustup target add` installs a target's std for whichever toolchain is
+      # active. Run from the repo root it would land on `stable`, and the pinned toolchain would
+      # then fail every cross build with "can't find crate for `core`".
+      - name: Install cross targets for the pinned toolchain
+        if: steps.native-cache.outputs.cache-hit != 'true' && matrix.zig
+        working-directory: core-bridge/rust/kt-bridge
+        run: rustup target add $(echo "${{ matrix.rust-targets }}" | tr ',' ' ')
       - name: Install protobuf (macOS)
         if: steps.native-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
         run: brew install protobuf
@@ -148,12 +161,39 @@ jobs:
         run: |
           set -euo pipefail
           count=$(find "${{ matrix.artifact-path }}" -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) 2>/dev/null | wc -l)
-          if [ "$count" -ne 1 ]; then
-            echo "ERROR: expected exactly one native library in ${{ matrix.artifact-path }}, found $count"
+          if [ "$count" -ne "${{ matrix.expected-libs }}" ]; then
+            echo "ERROR: expected ${{ matrix.expected-libs }} native libraries in ${{ matrix.artifact-path }}, found $count"
             ls -laR "${{ matrix.artifact-path }}" 2>/dev/null || echo "(directory does not exist)"
             exit 1
           fi
           find "${{ matrix.artifact-path }}" -type f -exec ls -la {} +
+
+      # The floor is only real if something checks it. A gnu library must need nothing newer than
+      # the pinned glibc, and a musl library must need no glibc symbol at all -- otherwise a
+      # future toolchain or dependency bump quietly ships a library that fails to load on the
+      # distributions the floor exists for.
+      - name: Verify glibc floor
+        if: matrix.zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          floor=$(grep -oE 'val glibcFloor = "[0-9.]+"' core-bridge/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+')
+          echo "pinned glibc floor: $floor"
+          fail=0
+          for so in $(find "${{ matrix.artifact-path }}" -name '*.so' -path '*-gnu/*'); do
+            need=$(objdump -T "$so" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -u | tail -1)
+            echo "$so needs glibc $need"
+            if [ "$(printf '%s\n%s\n' "$floor" "$need" | sort -t. -k1,1n -k2,2n | tail -1)" != "$floor" ]; then
+              echo "ERROR: $so requires GLIBC_$need, above the floor $floor"; fail=1
+            fi
+          done
+          for so in $(find "${{ matrix.artifact-path }}" -name '*.so' -path '*-musl/*'); do
+            if objdump -T "$so" | grep -q 'GLIBC_'; then
+              echo "ERROR: musl library $so references glibc symbols"; fail=1
+            fi
+            echo "$so: no glibc symbols (musl)"
+          done
+          exit $fail
 
       - uses: actions/upload-artifact@v4
         with:
@@ -171,18 +211,19 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux-x86_64-gnu
-            artifact-name: native-libs-linux-x86_64-gnu
-            artifact-path: core-bridge/build/native-libs/native/linux-x86_64-gnu
+            artifact-name: native-libs-linux
+            artifact-path: core-bridge/build/native-libs/native
             experimental: false
           - os: ubuntu-24.04-arm
             platform: linux-aarch64-gnu
-            artifact-name: native-libs-linux-aarch64-gnu
-            artifact-path: core-bridge/build/native-libs/native/linux-aarch64-gnu
+            artifact-name: native-libs-linux
+            artifact-path: core-bridge/build/native-libs/native
             experimental: false
           - os: macos-14
             platform: macos-aarch64
             artifact-name: native-libs-macos-aarch64
             artifact-path: core-bridge/build/native-libs/native/macos-aarch64
+            expected-libs: 1
             experimental: false
           # Windows was disabled in temporal-kt because the 30-minute cargo build made it
           # unreliable. That cost is gone here (the native is a downloaded artifact), so it runs
@@ -191,6 +232,7 @@ jobs:
             platform: windows-x86_64
             artifact-name: native-libs-windows
             artifact-path: core-bridge/build/native-libs/native/windows-x86_64
+            expected-libs: 1
             experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}

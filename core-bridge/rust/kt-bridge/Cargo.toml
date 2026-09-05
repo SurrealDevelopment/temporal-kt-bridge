@@ -48,5 +48,8 @@ prost-build = "0.14"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-strip = "debuginfo"
+# "symbols", not just "debuginfo": local symbols were 5 MB of an 18.8 MB library (measured
+# 2026-09-04: 18.8 -> 13.8 MB). The 24 exported kt_* symbols are dynamic exports and survive.
+# Fat LTO was measured the same day and bought nothing over thin (18.81 vs 18.79 MB).
+strip = "symbols"
 panic = "unwind"

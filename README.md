@@ -30,8 +30,10 @@ temporal-kt repository, or apply the `com.surrealdev.temporal` Gradle plugin, an
 
 ## Supported platforms
 
-`linux-x86_64-gnu`, `linux-aarch64-gnu`, `macos-aarch64`, `windows-x86_64`. musl/Alpine is not
-supported; `NativeLoader` fails with an explicit message rather than a confusing link error.
+`linux-x86_64-gnu`, `linux-aarch64-gnu`, `linux-x86_64-musl`, `linux-aarch64-musl`,
+`macos-aarch64`, `windows-x86_64`. The Linux libraries are cross-compiled with zig; the gnu ones
+link against glibc 2.17 (RHEL 7 and newer), the musl ones are for Alpine. CI fails if a gnu
+library needs anything newer than that floor.
 
 ## Building
 

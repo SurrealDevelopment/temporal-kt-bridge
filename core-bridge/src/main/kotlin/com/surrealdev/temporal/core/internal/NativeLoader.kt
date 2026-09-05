@@ -179,11 +179,7 @@ object NativeLoader {
                 }
 
                 osName.contains("linux") && isMusl -> {
-                    throw IllegalStateException(
-                        "Musl libc (Alpine Linux) is not currently supported. " +
-                            "Please use a glibc-based Linux distribution (e.g., Debian, Ubuntu). " +
-                            "For container deployments, use a glibc-based base image instead of Alpine.",
-                    )
+                    OS.LINUXMUSL
                 }
 
                 osName.contains("linux") -> {
@@ -210,35 +206,22 @@ object NativeLoader {
     }
 
     /**
-     * Detect if the current Linux system uses musl libc (e.g., Alpine Linux).
-     * This is a best-effort detection based on common indicators.
+     * Whether this Linux runs on musl (Alpine and friends).
+     *
+     * Decided from the filesystem alone: the dynamic loader musl installs is `/lib/ld-musl-<arch>.so.1`,
+     * and Alpine also ships `/etc/alpine-release`. The previous version forked `ldd --version`
+     * on every start, which is slow, and not available in distroless images at all.
      */
     private fun detectMuslLibc(): Boolean {
-        // Check for Alpine Linux indicator
-        val alpineRelease = java.io.File("/etc/alpine-release")
-        if (alpineRelease.exists()) {
-            return true
-        }
-
-        // Check ldd version output for musl
-        return try {
-            val process =
-                ProcessBuilder("ldd", "--version")
-                    .redirectErrorStream(true)
-                    .start()
-            val output = process.inputStream.bufferedReader().readText()
-            process.waitFor()
-            output.lowercase().contains("musl")
-        } catch (_: Exception) {
-            false
-        }
+        if (java.io.File("/etc/alpine-release").exists()) return true
+        val lib = java.io.File("/lib")
+        return lib.list()?.any { it.startsWith("ld-musl-") && it.endsWith(".so.1") } == true
     }
 
     private enum class OS {
         MACOS,
         LINUXGNU,
-
-        // LINUXMUSL,  // Future: Alpine Linux support
+        LINUXMUSL,
         WINDOWS,
     }
 
@@ -259,6 +242,7 @@ object NativeLoader {
                 when (os) {
                     OS.MACOS -> "macos-${arch.name.lowercase()}"
                     OS.LINUXGNU -> "linux-${arch.name.lowercase()}-gnu"
+                    OS.LINUXMUSL -> "linux-${arch.name.lowercase()}-musl"
                     OS.WINDOWS -> "windows-${arch.name.lowercase()}"
                 }
 
@@ -271,13 +255,14 @@ object NativeLoader {
                 when (os) {
                     OS.MACOS -> "macos-${arch.name.lowercase()}"
                     OS.LINUXGNU -> "linux-${arch.name.lowercase()}-gnu"
+                    OS.LINUXMUSL -> "linux-${arch.name.lowercase()}-musl"
                     OS.WINDOWS -> "windows-${arch.name.lowercase()}"
                 }
 
         fun libFileName(baseName: String): String =
             when (os) {
                 OS.MACOS -> "lib$baseName.dylib"
-                OS.LINUXGNU -> "lib$baseName.so"
+                OS.LINUXGNU, OS.LINUXMUSL -> "lib$baseName.so"
                 OS.WINDOWS -> "$baseName.dll"
             }
     }
