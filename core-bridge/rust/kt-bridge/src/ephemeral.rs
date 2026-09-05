@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use temporalio_sdk_core::ephemeral_server::{
     EphemeralExe, EphemeralExeVersion, EphemeralServer, TemporalDevServerConfig, TestServerConfig,
 };
@@ -48,16 +48,23 @@ impl EphemeralEntry {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        let mut server = self.server.lock().take();
-        match server.as_mut() {
+        // Keep the child in the entry until it is reaped. Cancellation must leave it available
+        // for runtime shutdown, and concurrent shutdowns must wait for the same child to exit.
+        let mut server = self.server.lock().await;
+        let result = match server.as_mut() {
             Some(server) => server.shutdown().await.map_err(|e| format!("{e:#}")),
             None => Ok(()), // idempotent
-        }
+        };
+        server.take();
+        result
     }
 
     /// Core's kill_on_drop stops the child even if another operation still holds this entry.
     pub fn free(&self) {
-        self.server.lock().take();
+        // A held lock means shutdown is already killing and reaping the child.
+        if let Ok(mut server) = self.server.try_lock() {
+            server.take();
+        }
     }
 }
 

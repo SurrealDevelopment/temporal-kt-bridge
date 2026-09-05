@@ -42,10 +42,12 @@ internal class KtRuntime private constructor(
     }
 
     /** Routes this worker's pushed tasks to [handler]. */
+    @Synchronized
     fun onWorkerEvents(
         worker: Long,
         handler: (Completion) -> Unit,
     ) {
+        ensureOpen()
         pushedHandlers[worker] = handler
     }
 

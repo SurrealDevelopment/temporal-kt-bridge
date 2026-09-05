@@ -68,7 +68,13 @@ internal class KtEphemeralServer private constructor(
                     writableStackTrace = true,
                 )
             }
-            val info = EphemeralServerInfo.parse(completion.payload)
+            val info =
+                try {
+                    EphemeralServerInfo.parse(completion.payload)
+                } catch (t: Throwable) {
+                    KtBridge.ephemeralFree(completion.aux0)
+                    throw t
+                }
             return KtEphemeralServer(
                 runtime = runtime,
                 handle = completion.aux0,
@@ -80,13 +86,7 @@ internal class KtEphemeralServer private constructor(
     }
 }
 
-/**
- * A hand-decoded `kt_bridge.EphemeralServerInfo`.
- *
- * Hand-decoded because the bridge's own protos are not on the SDK's classpath: `:protos` carries
- * Temporal's schema, not this crate's private config messages. Three fields does not justify a
- * second generated proto artifact.
- */
+/** Server metadata decoded with the same generated schema Rust uses. */
 internal data class EphemeralServerInfo(
     val target: String,
     val pid: Int,
@@ -94,42 +94,10 @@ internal data class EphemeralServerInfo(
 ) {
     companion object {
         fun parse(bytes: ByteArray): EphemeralServerInfo {
-            var index = 0
-            var target = ""
-            var pid = 0
-            var hasTestService = false
-
-            fun varint(): Long {
-                var result = 0L
-                var shift = 0
-                while (index < bytes.size) {
-                    val byte = bytes[index++].toInt()
-                    result = result or ((byte and 0x7F).toLong() shl shift)
-                    if (byte and 0x80 == 0) break
-                    shift += 7
-                }
-                return result
-            }
-
-            while (index < bytes.size) {
-                val tag = varint()
-                when ((tag shr 3).toInt()) {
-                    1 -> {
-                        val length = varint().toInt()
-                        target = String(bytes, index, length, Charsets.UTF_8)
-                        index += length
-                    }
-                    2 -> pid = varint().toInt()
-                    3 -> hasTestService = varint() != 0L
-                    else ->
-                        when ((tag and 0x7).toInt()) {
-                            0 -> varint()
-                            2 -> index += varint().toInt()
-                            else -> return EphemeralServerInfo(target, pid, hasTestService)
-                        }
-                }
-            }
-            return EphemeralServerInfo(target, pid, hasTestService)
+            val info =
+                com.surrealdev.temporal.core.proto.EphemeralServerInfo
+                    .parseFrom(bytes)
+            return EphemeralServerInfo(info.target, info.pid, info.hasTestService)
         }
     }
 }

@@ -169,10 +169,17 @@ kt_export! {
         let (entry, children) = HANDLES.remove_runtime(runtime)?;
         // Keep Core alive until every child has stopped. Drop no resources under the table lock.
         runtime::free_runtime(entry.clone());
+        let mut shutdown_error = None;
         for child in children {
+            // kill_on_drop sends a signal but does not reap the process. Await it while the
+            // reactor is still alive, otherwise runtime close can leave a zombie behind.
+            if let Entry::Ephemeral(server) = &child
+                && let Err(error) = entry.core.tokio_handle().block_on(server.shutdown()) {
+                shutdown_error.get_or_insert(error);
+            }
             child.close();
         }
-        Ok(())
+        shutdown_error.map_or(Ok(()), |error| Err(KtError::Failed(error)))
     }
 }
 

@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -13,6 +14,24 @@ import kotlin.test.assertTrue
  * Needs a `temporal` binary; set TEMPORAL_CLI_PATH, or it is skipped loudly.
  */
 class KtEphemeralServerTest {
+    @Test
+    fun `server info skips unknown fixed fields and rejects truncated data`() {
+        val expected = EphemeralServerInfo("localhost:7233", 123, true)
+        val info =
+            com.surrealdev.temporal.core.proto.EphemeralServerInfo
+                .newBuilder()
+                .setTarget(expected.target)
+                .setPid(expected.pid)
+                .setHasTestService(expected.hasTestService)
+                .build()
+                .toByteArray()
+        // Unknown field 4, fixed32, precedes the known fields.
+        assertEquals(expected, EphemeralServerInfo.parse(byteArrayOf(0x25, 1, 2, 3, 4) + info))
+        assertFailsWith<com.google.protobuf.InvalidProtocolBufferException> {
+            EphemeralServerInfo.parse(byteArrayOf(0x10, 0x80.toByte()))
+        }
+    }
+
     private fun cli(): String? = System.getenv("TEMPORAL_CLI_PATH")?.takeIf { it.isNotEmpty() }
 
     @Test

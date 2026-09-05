@@ -48,7 +48,13 @@ internal class TaskStream {
                 if (tasks.isNotEmpty()) ready.trySend(Unit)
                 return task
             }
-            val wakeup = ready.receiveCatching()
+            val wakeup =
+                try {
+                    ready.receiveCatching()
+                } finally {
+                    // Prompt cancellation can consume a wakeup without consuming its task.
+                    if (tasks.isNotEmpty()) ready.trySend(Unit)
+                }
             if (wakeup.isClosed) {
                 // A final task can be enqueued between the empty check and stream closure.
                 tasks.poll()?.let { return it }
@@ -245,7 +251,12 @@ internal class KtWorker private constructor(
                 }
             val worker = KtWorker(runtime, handle)
             // Registered before start(), so no task can arrive with nowhere to go.
-            runtime.onWorkerEvents(handle, worker::onEvent)
+            try {
+                runtime.onWorkerEvents(handle, worker::onEvent)
+            } catch (t: Throwable) {
+                worker.close()
+                throw t
+            }
             return worker
         }
     }

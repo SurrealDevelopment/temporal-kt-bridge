@@ -104,7 +104,24 @@ fn a_dev_server_starts_reports_its_pid_and_shuts_down() {
     let entry = HANDLES.ephemeral(handle).expect("handle");
 
     runtime::spawn_request(&rt, 2, async move {
-        match entry.shutdown().await {
+        let finished = std::sync::atomic::AtomicBool::new(false);
+        let (first, second) = tokio::join!(
+            biased;
+            async {
+                let result = entry.shutdown().await;
+                finished.store(true, std::sync::atomic::Ordering::Release);
+                result
+            },
+            async {
+                let result = entry.shutdown().await;
+                assert!(
+                    finished.load(std::sync::atomic::Ordering::Acquire),
+                    "concurrent shutdown must wait for the child to be reaped"
+                );
+                result
+            },
+        );
+        match first.and(second) {
             Ok(()) => queue::Pending::ack(2),
             Err(message) => queue::Pending::error(2, -8, message),
         }
