@@ -47,6 +47,10 @@ cd temporal-kt-bridge
 ./gradlew build
 ```
 
+`./gradlew detekt` runs type-aware analysis of handwritten main and test Kotlin sources.
+It also runs as part of `check` and `build`, using the correctness-focused allowlist in
+`config/detekt.yml`. Generated sources are excluded; ktlint handles formatting.
+
 SDK-Core comes from crates.io -- no submodule, no fork. See `core-bridge/README.md` for
 the procedure for moving to a newer upstream.
 

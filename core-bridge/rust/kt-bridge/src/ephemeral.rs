@@ -20,10 +20,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use temporalio_sdk_core::ephemeral_server::{
     EphemeralExe, EphemeralExeVersion, EphemeralServer, TemporalDevServerConfig, TestServerConfig,
 };
+use tokio::sync::Mutex;
 
 use crate::error::{KtError, KtResult};
 
@@ -92,7 +92,11 @@ fn exe(options: &crate::proto::EphemeralServerOptions) -> EphemeralExe {
         version,
         dest_dir: (!options.download_dest_dir.is_empty())
             .then(|| options.download_dest_dir.clone()),
-        ttl: Some(Duration::from_secs(60 * 60 * 24)),
+        ttl: options
+            .download_ttl_seconds
+            .or(Some(60 * 60 * 24))
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs),
     }
 }
 
@@ -182,6 +186,24 @@ mod tests {
         handle::{Entry, HANDLES, KIND_EPHEMERAL},
         queue::{Pending, Queue},
     };
+
+    #[test]
+    fn download_ttl_preserves_default_zero_and_explicit_lifetimes() {
+        for (seconds, expected) in [
+            (None, Some(86_400)),
+            (Some(0), None),
+            (Some(123), Some(123)),
+        ] {
+            let options = crate::proto::EphemeralServerOptions {
+                download_ttl_seconds: seconds,
+                ..Default::default()
+            };
+            let EphemeralExe::CachedDownload { ttl, .. } = exe(&options) else {
+                panic!("expected a cached download");
+            };
+            assert_eq!(ttl, expected.map(Duration::from_secs));
+        }
+    }
 
     #[test]
     fn a_port_outside_the_tcp_range_is_rejected_instead_of_selecting_a_random_port() {

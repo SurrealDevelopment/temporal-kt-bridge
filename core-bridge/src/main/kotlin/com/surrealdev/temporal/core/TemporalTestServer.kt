@@ -77,11 +77,12 @@ class TemporalTestServer private constructor(
     override fun isClosed(): Boolean = closed || kt.runtimeClosed
 
     companion object {
-        @Suppress("LongParameterList", "UNUSED_PARAMETER")
+        @Suppress("LongParameterList")
         suspend fun start(
             runtime: TemporalRuntime,
             existingPath: String? = null,
             downloadVersion: String = "default",
+            // Zero keeps cached downloads indefinitely.
             downloadTtlSeconds: Long = 0,
             searchAttributes: List<Pair<String, String>> = emptyList(),
             extraArgs: List<String> = emptyList(),
@@ -106,6 +107,7 @@ class TemporalTestServer private constructor(
                         // 404s on temporal.download. "default" lets Core pick the version it was
                         // built against.
                         downloadVersion = downloadVersion,
+                        downloadTtlSeconds = downloadTtlSeconds,
                         namespace = "default",
                         ip = "127.0.0.1",
                         extraArgs = allArgs,

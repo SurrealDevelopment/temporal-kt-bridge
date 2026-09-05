@@ -2,6 +2,8 @@
 // `buildSrc` is a Gradle-recognized directory and every plugin there will be easily available in the rest of the build.
 package buildsrc.convention
 
+import dev.detekt.gradle.Detekt
+import dev.detekt.gradle.extensions.DetektExtension
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 import org.jlleitschuh.gradle.ktlint.KtlintExtension
@@ -11,8 +13,26 @@ plugins {
     kotlin("jvm")
     // ktlint for code formatting
     id("org.jlleitschuh.gradle.ktlint")
+    id("dev.detekt")
     // Dokka for documentation generation
     id("org.jetbrains.dokka")
+}
+
+configure<DetektExtension> {
+    config.setFrom(rootProject.file("config/detekt.yml"))
+    buildUponDefaultConfig.set(false)
+}
+
+// The plain task has no type resolution; make both detekt and check run typed analysis.
+tasks.named<Detekt>("detekt") {
+    enabled = false
+    dependsOn("detektMain", "detektTest")
+}
+
+tasks.withType<Detekt>().configureEach {
+    // Source-set roots strip build/generated from relative paths, so use the actual file path.
+    val generatedDir = layout.buildDirectory.get().asFile
+    exclude { it.file.startsWith(generatedDir) }
 }
 
 configure<KtlintExtension> {

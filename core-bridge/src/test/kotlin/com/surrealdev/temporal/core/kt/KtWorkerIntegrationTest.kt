@@ -51,13 +51,13 @@ class KtWorkerIntegrationTest {
 
                             // Every stream must have closed. A stream left open is a consumer
                             // suspended forever, which is the hang this design removes.
-                            assertStreamClosed("workflow activations") {
+                            assertStreamClosed {
                                 worker.workflowActivationStream.receive()
                             }
-                            assertStreamClosed("activity tasks") {
+                            assertStreamClosed {
                                 worker.activityTaskStream.receive()
                             }
-                            assertStreamClosed("nexus tasks") {
+                            assertStreamClosed {
                                 worker.nexusTaskStream.receive()
                             }
                         }
@@ -94,10 +94,7 @@ class KtWorkerIntegrationTest {
         }
     }
 
-    private suspend fun assertStreamClosed(
-        name: String,
-        receive: suspend () -> ByteArray,
-    ) {
+    private suspend fun assertStreamClosed(receive: suspend () -> ByteArray) {
         try {
             receive()
             // A task is fine too: it means the stream had buffered work, not that it hung.

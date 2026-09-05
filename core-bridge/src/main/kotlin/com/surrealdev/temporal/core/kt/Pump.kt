@@ -117,6 +117,8 @@ internal class Pump(
             } catch (t: Throwable) {
                 pending.remove(reqId)
                 // A bridge-level failure to even issue the request surfaces in the public form.
+                // Keep retirement shared across failures; only native errors need translation.
+                @Suppress("InstanceOfCheckForException")
                 val mapped = if (t is KtBridgeException) t.asCore("request could not be issued") else t
                 if (continuation.isActive) continuation.resumeWithException(mapped)
                 return@suspendCancellableCoroutine

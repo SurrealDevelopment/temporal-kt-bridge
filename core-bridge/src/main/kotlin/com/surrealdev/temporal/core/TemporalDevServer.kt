@@ -50,13 +50,14 @@ class TemporalDevServer private constructor(
     override fun isClosed(): Boolean = closed || kt.runtimeClosed
 
     companion object {
-        @Suppress("LongParameterList", "UNUSED_PARAMETER")
+        @Suppress("LongParameterList")
         suspend fun start(
             runtime: TemporalRuntime,
             namespace: String = "default",
             ip: String = "127.0.0.1",
             existingPath: String? = null,
             downloadVersion: String? = BuildConfig.TEMPORAL_CLI_VERSION,
+            // Zero keeps cached downloads indefinitely.
             downloadTtlSeconds: Long = 0,
             searchAttributes: List<Pair<String, String>> = emptyList(),
             extraArgs: List<String> = emptyList(),
@@ -77,6 +78,7 @@ class TemporalDevServer private constructor(
                     EphemeralServerOptionsProto.encode(
                         existingPath = existingPath,
                         downloadVersion = downloadVersion,
+                        downloadTtlSeconds = downloadTtlSeconds,
                         namespace = namespace,
                         ip = ip,
                         extraArgs = allArgs,

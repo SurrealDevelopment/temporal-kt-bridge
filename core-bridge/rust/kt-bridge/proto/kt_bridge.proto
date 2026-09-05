@@ -194,6 +194,8 @@ message EphemeralServerOptions {
   // Where the child's output goes. Empty means discard. Never the JVM's own stdio: an
   // orphaned child holding that is what hangs a Gradle build after the tests have passed.
   string log_file = 12;
+  // Zero keeps cached downloads indefinitely. Unset preserves the bridge default of one day.
+  optional uint64 download_ttl_seconds = 13;
 }
 
 message EphemeralServerInfo {
