@@ -107,7 +107,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ matrix.artifact-path }}
-          key: native-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/kt-bridge/Cargo.lock', 'core-bridge/rust/kt-bridge/rust-toolchain.toml', 'core-bridge/rust/kt-bridge/src/**') }}
+          # Everything that shapes the library, not just the sources: Cargo.toml (profile: lto,
+          # strip), .cargo/config.toml (musl -crt-static), the Gradle script (zig, glibc floor) and
+          # this workflow (how the toolchain is set up). The first per-target zig run restored a
+          # library the old native aarch64 job had built against glibc 2.39, skipped the build,
+          # and the floor check rejected it -- the key had not changed. The v2 prefix retires
+          # those entries.
+          key: native-v2-${{ matrix.platform }}-${{ hashFiles('core-bridge/rust/kt-bridge/Cargo.lock', 'core-bridge/rust/kt-bridge/Cargo.toml', 'core-bridge/rust/kt-bridge/.cargo/**', 'core-bridge/rust/kt-bridge/build.rs', 'core-bridge/rust/kt-bridge/rust-toolchain.toml', 'core-bridge/rust/kt-bridge/src/**', 'core-bridge/rust/kt-bridge/proto/**', 'core-bridge/build.gradle.kts', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
       - uses: actions/setup-java@v4
         if: steps.native-cache.outputs.cache-hit != 'true'
         with:
